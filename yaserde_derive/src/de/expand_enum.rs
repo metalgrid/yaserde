@@ -28,15 +28,18 @@ pub fn parse(
 
   let element_name = if let Some(tag) = &root_attributes.tag {
     quote! {
-      attributes
-        .iter()
-        .find(|attr| attr.name.local_name.as_str() == #tag)
-        .ok_or(format!("Expected enum tagged with {}, found {:?}", #tag, event))?
-        .value.as_str()
+      {
+        let __attrs = reader.peek_attributes()?.unwrap_or_default();
+        __attrs
+          .into_iter()
+          .find(|attr| attr.name.local_name.as_str() == #tag)
+          .ok_or(::std::format!("Expected enum tagged with {}", #tag))?
+          .value
+      }
     }
   } else {
     quote! {
-      name.local_name.as_str()
+      local_name
     }
   };
 
@@ -46,12 +49,14 @@ pub fn parse(
       fn deserialize<R: ::std::io::Read>(
         reader: &mut ::yaserde::de::Deserializer<R>,
       ) -> ::std::result::Result<Self, ::std::string::String> {
-        let (named_element, enum_namespace) =
-          if let ::yaserde::__xml::reader::XmlEvent::StartElement{ name, .. } = reader.peek()?.to_owned() {
-            (name.local_name.to_owned(), name.namespace.clone())
-          } else {
-            (::std::string::String::from(#root), ::std::option::Option::None)
-          };
+        let (named_element, enum_namespace) = {
+          match reader.peek()? {
+            ::yaserde::__xml::reader::XmlEvent::StartElement{ name, .. } => {
+              (name.local_name.clone(), name.namespace.clone())
+            }
+            _ => (::std::string::String::from(#root), ::std::option::Option::None),
+          }
+        };
 
         let start_depth = reader.depth();
         ::yaserde::__derive_debug!("Enum {} @ {}: start to parse {:?}", stringify!(#name), start_depth, named_element);
@@ -62,34 +67,35 @@ pub fn parse(
         let mut enum_value = ::std::option::Option::None;
 
         loop {
-          let event = reader.peek()?.to_owned();
-          ::yaserde::__derive_trace!("Enum {} @ {}: matching {:?}", stringify!(#name), start_depth, event);
-          match event {
-            ::yaserde::__xml::reader::XmlEvent::StartElement { ref name, ref attributes, .. } => {
-              match #element_name {
+          let __peek_event = reader.peek_light()?;
+          ::yaserde::__derive_trace!("Enum {} @ {}: matching {:?}", stringify!(#name), start_depth, __peek_event);
+          match __peek_event {
+            ::yaserde::de::LightEvent::StartElement { local_name, .. } => {
+              let __element_name = #element_name;
+              match __element_name.as_str() {
                 #match_to_enum
                 _named_element => {
                   let _root = reader.next_event();
                 }
               }
 
-              if let ::yaserde::__xml::reader::XmlEvent::Characters(content) = reader.peek()?.to_owned() {
+              if let ::yaserde::de::LightEvent::Characters(content) = reader.peek_light()? {
                 match content.as_str() {
                   #match_to_enum
                   _ => {}
                 }
               }
             }
-            ::yaserde::__xml::reader::XmlEvent::EndElement { ref name } => {
-              if name.local_name == named_element && reader.depth() == start_depth + 1 {
+            ::yaserde::de::LightEvent::EndElement { local_name } => {
+              if local_name == named_element && reader.depth() == start_depth + 1 {
                 break;
               }
               let _root = reader.next_event();
             }
-            ::yaserde::__xml::reader::XmlEvent::Characters(ref text_content) => {
+            ::yaserde::de::LightEvent::Characters(text_content) => {
               let _root = reader.next_event();
             }
-            ::yaserde::__xml::reader::XmlEvent::EndDocument => {
+            ::yaserde::de::LightEvent::EndDocument => {
               if #flatten {
                 break;
               }
@@ -97,9 +103,6 @@ pub fn parse(
               return ::std::result::Result::Err(
                 ::std::format!("End of document, missing some content ?"),
               );
-            }
-            event => {
-              return ::std::result::Result::Err(::std::format!("unknown event {:?}", event))
             }
           }
         }
@@ -242,7 +245,7 @@ fn build_unnamed_visitor_calls(
           let visitor = #visitor_label{};
 
           let result = reader.read_inner_value::<#field_type, _>(|reader| {
-            if let ::yaserde::__xml::reader::XmlEvent::EndElement { .. } = *reader.peek()? {
+            if let ::yaserde::de::LightEvent::EndElement { .. } = reader.peek_light()? {
               return visitor.#visitor("");
             }
 

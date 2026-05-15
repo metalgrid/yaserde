@@ -158,7 +158,7 @@ pub fn parse(
               // Don't count current struct's StartElement as substruct's StartElement
               let _root = reader.next_event();
             }
-            if let Ok(::yaserde::__xml::reader::XmlEvent::StartElement { .. }) = reader.peek() {
+            if let Ok(::yaserde::de::LightEvent::StartElement { .. }) = reader.peek_light() {
               // If substruct's start element found then deserialize substruct
               let value = <#struct_name as ::yaserde::YaDeserialize>::deserialize(reader)?;
               #value_label #action;
@@ -235,7 +235,7 @@ pub fn parse(
 
       let visit = |action: &TokenStream, visitor: &Ident, visitor_label: &Ident| {
         Some(quote! {
-          for attr in attributes {
+          for attr in &attributes {
             if attr.name.local_name == #label_name {
               let visitor = #visitor_label{};
               let value = visitor.#visitor(&attr.value)?;
@@ -247,7 +247,7 @@ pub fn parse(
 
       let visit_vec = |action: &TokenStream, visitor: &Ident, visitor_label: &Ident| {
         Some(quote! {
-          for attr in attributes {
+          for attr in &attributes {
             if attr.name.local_name == #label_name {
               for value in attr.value.split_whitespace() {
                 let visitor = #visitor_label{};
@@ -261,7 +261,7 @@ pub fn parse(
 
       let visit_string = || {
         Some(quote! {
-          for attr in attributes {
+          for attr in &attributes {
             if attr.name.local_name == #label_name {
               #label = Some(attr.value.to_owned());
             }
@@ -329,10 +329,10 @@ pub fn parse(
       };
 
       match field.get_type() {
-        Field::FieldString => set_text(&quote! { Some(text_content.to_owned()) }),
+        Field::FieldString => set_text(&quote! { Some(text_content) }),
         Field::FieldOption { data_type } => match *data_type {
           Field::FieldString => set_text(
-            &quote! { if text_content.is_empty() { None } else { Some(text_content.to_owned()) }},
+            &quote! { if text_content.is_empty() { None } else { Some(text_content) }},
           ),
           _ => None,
         },
@@ -392,12 +392,14 @@ pub fn parse(
       fn deserialize<R: ::std::io::Read>(
         reader: &mut ::yaserde::de::Deserializer<R>,
       ) -> ::std::result::Result<Self, ::std::string::String> {
-        let (named_element, struct_namespace) =
-          if let ::yaserde::__xml::reader::XmlEvent::StartElement { name, .. } = reader.peek()?.to_owned() {
-            (name.local_name.to_owned(), name.namespace.clone())
-          } else {
-            (::std::string::String::from(#root), ::std::option::Option::None)
-          };
+        let (named_element, struct_namespace) = {
+          match reader.peek()? {
+            ::yaserde::__xml::reader::XmlEvent::StartElement { name, .. } => {
+              (name.local_name.clone(), name.namespace.clone())
+            }
+            _ => (::std::string::String::from(#root), ::std::option::Option::None),
+          }
+        };
         let start_depth = reader.depth();
         ::yaserde::__derive_debug!("Struct {} @ {}: start to parse {:?}", stringify!(#name), start_depth,
                named_element);
@@ -413,28 +415,28 @@ pub fn parse(
         let mut depth = 0;
 
         loop {
-          let event = reader.peek()?.to_owned();
+          let __peek_event = reader.peek_light()?;
           ::yaserde::__derive_trace!(
             "Struct {} @ {}: matching {:?}",
-            stringify!(#name), start_depth, event,
+            stringify!(#name), start_depth, __peek_event,
           );
-          match event {
-            ::yaserde::__xml::reader::XmlEvent::StartElement{ref name, ref attributes, ..} => {
-              let namespace = name.namespace.clone().unwrap_or_default();
-              if depth == 0 && name.local_name == #root && namespace.as_str() == #root_namespace {
-                // Consume root element. We must do this first. In the case it shares a name with a child element, we don't
-                // want to prematurely match the child element below.
+          match __peek_event {
+            ::yaserde::de::LightEvent::StartElement { local_name, namespace: namespace_opt } => {
+              let namespace = namespace_opt.clone().unwrap_or_default();
+              let attributes: ::std::vec::Vec<::yaserde::__xml::attribute::OwnedAttribute> =
+                if depth == 0 { reader.peek_attributes()?.unwrap_or_default() } else { ::std::vec::Vec::new() };
+              if depth == 0 && local_name == #root && namespace.as_str() == #root_namespace {
                 let event = reader.next_event()?;
                 #write_unused
               } else {
 
-                match (namespace.as_str(), name.local_name.as_str()) {
+                match (namespace.as_str(), local_name.as_str()) {
                   #call_visitors
                   _ => {
                     let event = reader.next_event()?;
                     #write_unused
 
-                    if depth > 0 { // Don't skip root element
+                    if depth > 0 {
                       reader.skip_element(|event| {
                         #write_unused
                       })?;
@@ -442,13 +444,14 @@ pub fn parse(
                   }
                 }
               }
-              if depth == 0 { // Look for attributes only at element start
+              if depth == 0 {
                 #attributes_loading
               }
               depth += 1;
             }
-            ::yaserde::__xml::reader::XmlEvent::EndElement { ref name } => {
-              if name.local_name == named_element && reader.depth() == start_depth + 1 {
+            ::yaserde::de::LightEvent::EndElement { local_name } => {
+              if local_name == named_element && reader.depth() == start_depth + 1 {
+                let event = reader.peek()?.to_owned();
                 #write_unused
                 break;
               }
@@ -456,18 +459,15 @@ pub fn parse(
               #write_unused
               depth -= 1;
             }
-            ::yaserde::__xml::reader::XmlEvent::EndDocument => {
+            ::yaserde::de::LightEvent::EndDocument => {
               if #flatten {
                 break;
               }
             }
-            ::yaserde::__xml::reader::XmlEvent::Characters(ref text_content) => {
+            ::yaserde::de::LightEvent::Characters(text_content) => {
               #set_text
               let event = reader.next_event()?;
               #write_unused
-            }
-            event => {
-              return ::std::result::Result::Err(::std::format!("unknown event {:?}", event));
             }
           }
         }
@@ -494,8 +494,8 @@ fn build_call_visitor(
 
   let namespaces_matching = field.get_namespace_matching(
     root_attributes,
-    quote!(name.namespace.as_ref()),
-    quote!(name.local_name.as_str()),
+    quote!(namespace_opt.as_ref()),
+    quote!(local_name.as_str()),
   );
 
   let namespace = field.prefix_namespace(root_attributes);
