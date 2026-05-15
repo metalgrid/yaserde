@@ -177,18 +177,22 @@ impl<W: Write> Serializer<W> {
 
         let tag = format_name(&name);
         let mut bs = BytesStart::new(tag.clone());
-        let mut namespace_scope = self.namespace_stack.last().cloned().unwrap_or_default();
+        let mut new_bindings = HashMap::new();
 
         for (prefix, uri) in namespace.as_ref().iter() {
           if prefix == "xml" || prefix == "xmlns" {
             continue;
           }
 
-          if namespace_scope
-            .get(prefix)
-            .map(|existing| existing == uri)
-            .unwrap_or(false)
-          {
+          // Check if this exact (prefix, uri) binding already exists in any
+          // parent scope. Search from newest to oldest so that a closer scope
+          // that shadows the prefix with a different URI takes precedence.
+          let already_declared = self.namespace_stack.iter().rev().find_map(|scope| {
+            scope.get(prefix)
+          }).map(|existing| existing == uri).unwrap_or(false)
+            || new_bindings.get(prefix).map(|existing| existing == uri).unwrap_or(false);
+
+          if already_declared {
             continue;
           }
 
@@ -199,7 +203,7 @@ impl<W: Write> Serializer<W> {
             bs.push_attribute((attr_name.as_str(), uri));
           }
 
-          namespace_scope.insert(prefix.to_string(), uri.to_string());
+          new_bindings.insert(prefix.to_string(), uri.to_string());
         }
 
         for attr in attributes.iter() {
@@ -208,7 +212,7 @@ impl<W: Write> Serializer<W> {
         }
 
         self.element_stack.push(tag.clone());
-        self.namespace_stack.push(namespace_scope);
+        self.namespace_stack.push(new_bindings);
         self.pending_start = Some((tag, bs.into_owned()));
       }
       XmlEvent::EndElement { name } => {
@@ -320,6 +324,90 @@ impl<W: Write> Serializer<W> {
         .map_err(map_io_error)?;
     }
 
+    Ok(())
+  }
+
+  /// Write a start element directly, bypassing xml-rs `XmlEvent` construction.
+  /// `tag` is the fully-qualified element name (e.g. `"prefix:local"` or `"local"`).
+  /// `attrs` is an iterator of `(attr_name, attr_value)` pairs.
+  pub fn write_start_element<I>(&mut self, tag: &str, attrs: I) -> Result<(), String>
+  where
+    I: IntoIterator<Item = (String, String)>,
+  {
+    self
+      .flush_pending_start()
+      .map_err(|e| e.to_string())?;
+
+    let mut bs = BytesStart::new(tag);
+    for (name, value) in attrs {
+      bs.push_attribute((name.as_str(), value.as_str()));
+    }
+
+    self.element_stack.push(tag.to_string());
+    self.namespace_stack.push(HashMap::new());
+    self.pending_start = Some((tag.to_string(), bs.into_owned()));
+    Ok(())
+  }
+
+  /// Write an end element directly, bypassing xml-rs `XmlEvent` construction.
+  /// Uses the tag from the element stack if available.
+  pub fn write_end_element(&mut self, tag: &str) -> Result<(), String> {
+    if let Some((pending_tag, pending_start)) = self.pending_start.take() {
+      if pending_tag == tag {
+        self.element_stack.pop();
+        self.namespace_stack.pop();
+        self
+          .writer
+          .write_event(Event::Empty(pending_start))
+          .map_err(|e| e.to_string())?;
+        return Ok(());
+      }
+
+      self
+        .writer
+        .write_event(Event::Start(pending_start))
+        .map_err(|e| e.to_string())?;
+    }
+
+    if self
+      .element_stack
+      .last()
+      .map(|t| t == tag)
+      .unwrap_or(false)
+    {
+      self.element_stack.pop();
+      self.namespace_stack.pop();
+    }
+
+    self
+      .writer
+      .write_event(Event::End(BytesEnd::new(tag)))
+      .map_err(|e| e.to_string())?;
+    Ok(())
+  }
+
+  /// Write text content directly, bypassing xml-rs `XmlEvent` construction.
+  pub fn write_text(&mut self, text: &str) -> Result<(), String> {
+    self
+      .flush_pending_start()
+      .map_err(|e| e.to_string())?;
+    let escaped = quick_xml::escape::partial_escape(text);
+    self
+      .writer
+      .write_event(Event::Text(BytesText::from_escaped(escaped)))
+      .map_err(|e| e.to_string())?;
+    Ok(())
+  }
+
+  /// Write CDATA content directly, bypassing xml-rs `XmlEvent` construction.
+  pub fn write_cdata(&mut self, data: &str) -> Result<(), String> {
+    self
+      .flush_pending_start()
+      .map_err(|e| e.to_string())?;
+    self
+      .writer
+      .write_event(Event::CData(BytesCData::new(data)))
+      .map_err(|e| e.to_string())?;
     Ok(())
   }
 }

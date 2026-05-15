@@ -176,9 +176,7 @@ macro_rules! serialize_type {
     impl YaSerialize for $type {
       fn serialize<W: Write>(&self, writer: &mut ser::Serializer<W>) -> Result<(), String> {
         let content = format!("{}", self);
-        let event = XmlEvent::characters(&content);
-        let _ret = writer.write(event);
-        Ok(())
+        writer.write_text(&content)
       }
 
       fn serialize_attributes(

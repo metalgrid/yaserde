@@ -14,20 +14,14 @@ pub fn serialize_primitives<S, W: Write>(
 
   if !writer.skip_start_end() {
     writer
-      .write(xml::writer::XmlEvent::start_element(name.as_str()))
-      .map_err(|_e| format!("Start element {name:?} write failed"))?;
+      .write_start_element(&name, ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
   }
 
-  writer
-    .write(xml::writer::XmlEvent::characters(
-      serialize_function(self_bypass).as_str(),
-    ))
-    .map_err(|_e| format!("Element value {name:?} write failed"))?;
+  let content = serialize_function(self_bypass);
+  writer.write_text(&content)?;
 
   if !writer.skip_start_end() {
-    writer
-      .write(xml::writer::XmlEvent::end_element())
-      .map_err(|_e| format!("End element {name:?} write failed"))?;
+    writer.write_end_element(&name)?;
   }
 
   Ok(())
