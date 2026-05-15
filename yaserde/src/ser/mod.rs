@@ -187,10 +187,17 @@ impl<W: Write> Serializer<W> {
           // Check if this exact (prefix, uri) binding already exists in any
           // parent scope. Search from newest to oldest so that a closer scope
           // that shadows the prefix with a different URI takes precedence.
-          let already_declared = self.namespace_stack.iter().rev().find_map(|scope| {
-            scope.get(prefix)
-          }).map(|existing| existing == uri).unwrap_or(false)
-            || new_bindings.get(prefix).map(|existing| existing == uri).unwrap_or(false);
+          let already_declared = self
+            .namespace_stack
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(prefix))
+            .map(|existing| existing == uri)
+            .unwrap_or(false)
+            || new_bindings
+              .get(prefix)
+              .map(|existing| existing == uri)
+              .unwrap_or(false);
 
           if already_declared {
             continue;
@@ -255,7 +262,7 @@ impl<W: Write> Serializer<W> {
       }
       XmlEvent::Characters(data) => {
         self.flush_pending_start()?;
-        let escaped = quick_xml::escape::partial_escape(&*data);
+        let escaped = quick_xml::escape::partial_escape(data);
         self
           .writer
           .write_event(Event::Text(BytesText::from_escaped(escaped)))
@@ -328,23 +335,71 @@ impl<W: Write> Serializer<W> {
   }
 
   /// Write a start element directly, bypassing xml-rs `XmlEvent` construction.
+  ///
   /// `tag` is the fully-qualified element name (e.g. `"prefix:local"` or `"local"`).
   /// `attrs` is an iterator of `(attr_name, attr_value)` pairs.
-  pub fn write_start_element<I>(&mut self, tag: &str, attrs: I) -> Result<(), String>
+  /// `namespaces` is an iterator of `(prefix, uri)` pairs (use `""` for default namespace).
+  ///
+  /// Handles XML declaration emission (for `Serializer::new(EventWriter)` path),
+  /// pending-start semantics (for empty-element coalescing), and namespace
+  /// duplicate suppression against the parent scope chain.
+  ///
+  /// This method is `doc(hidden)` — it is intended for generated derive code, not
+  /// as stable public API.
+  #[doc(hidden)]
+  pub fn write_start_element<I, N>(
+    &mut self,
+    tag: &str,
+    attrs: I,
+    namespaces: N,
+  ) -> Result<(), String>
   where
     I: IntoIterator<Item = (String, String)>,
+    N: IntoIterator<Item = (String, String)>,
   {
-    self
-      .flush_pending_start()
-      .map_err(|e| e.to_string())?;
+    self.emit_xml_declaration()?;
+    self.flush_pending_start().map_err(|e| e.to_string())?;
 
     let mut bs = BytesStart::new(tag);
+    let mut new_bindings = HashMap::new();
+
+    for (prefix, uri) in namespaces {
+      if prefix == "xml" || prefix == "xmlns" {
+        continue;
+      }
+
+      let already_declared = self
+        .namespace_stack
+        .iter()
+        .rev()
+        .find_map(|scope| scope.get(&prefix))
+        .map(|existing| existing == &uri)
+        .unwrap_or(false)
+        || new_bindings
+          .get(&prefix)
+          .map(|existing| existing == &uri)
+          .unwrap_or(false);
+
+      if already_declared {
+        continue;
+      }
+
+      if prefix.is_empty() {
+        bs.push_attribute(("xmlns", uri.as_str()));
+      } else {
+        let attr_name = format!("xmlns:{}", prefix);
+        bs.push_attribute((attr_name.as_str(), uri.as_str()));
+      }
+
+      new_bindings.insert(prefix, uri);
+    }
+
     for (name, value) in attrs {
       bs.push_attribute((name.as_str(), value.as_str()));
     }
 
     self.element_stack.push(tag.to_string());
-    self.namespace_stack.push(HashMap::new());
+    self.namespace_stack.push(new_bindings);
     self.pending_start = Some((tag.to_string(), bs.into_owned()));
     Ok(())
   }
@@ -369,12 +424,7 @@ impl<W: Write> Serializer<W> {
         .map_err(|e| e.to_string())?;
     }
 
-    if self
-      .element_stack
-      .last()
-      .map(|t| t == tag)
-      .unwrap_or(false)
-    {
+    if self.element_stack.last().map(|t| t == tag).unwrap_or(false) {
       self.element_stack.pop();
       self.namespace_stack.pop();
     }
@@ -387,10 +437,12 @@ impl<W: Write> Serializer<W> {
   }
 
   /// Write text content directly, bypassing xml-rs `XmlEvent` construction.
+  ///
+  /// `#[doc(hidden)]` — intended for generated derive code.
+  #[doc(hidden)]
   pub fn write_text(&mut self, text: &str) -> Result<(), String> {
-    self
-      .flush_pending_start()
-      .map_err(|e| e.to_string())?;
+    self.emit_xml_declaration()?;
+    self.flush_pending_start().map_err(|e| e.to_string())?;
     let escaped = quick_xml::escape::partial_escape(text);
     self
       .writer
@@ -400,14 +452,30 @@ impl<W: Write> Serializer<W> {
   }
 
   /// Write CDATA content directly, bypassing xml-rs `XmlEvent` construction.
+  ///
+  /// `#[doc(hidden)]` — intended for generated derive code.
+  #[doc(hidden)]
   pub fn write_cdata(&mut self, data: &str) -> Result<(), String> {
-    self
-      .flush_pending_start()
-      .map_err(|e| e.to_string())?;
+    self.emit_xml_declaration()?;
+    self.flush_pending_start().map_err(|e| e.to_string())?;
     self
       .writer
       .write_event(Event::CData(BytesCData::new(data)))
       .map_err(|e| e.to_string())?;
+    Ok(())
+  }
+
+  /// Emit the XML declaration if required by the serializer's configuration
+  /// and not yet emitted. Called by direct write methods to ensure parity
+  /// with the `Serializer::write(XmlEvent)` path.
+  fn emit_xml_declaration(&mut self) -> Result<(), String> {
+    if self.use_xml_rs_public_defaults && !self.write_document_declaration {
+      self
+        .writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .map_err(|e| e.to_string())?;
+      self.write_document_declaration = true;
+    }
     Ok(())
   }
 }

@@ -16,7 +16,7 @@ pub fn enclose_characters(label: &Option<Ident>, label_name: String) -> TokenStr
 
 fn enclose_xml_event(label_name: String, yaserde_format: TokenStream) -> TokenStream {
   quote! {
-    writer.write_start_element(#label_name, ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
+    writer.write_start_element(#label_name, ::std::iter::empty(), ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
 
     let yaserde_value = #yaserde_format;
     writer.write_text(&yaserde_value)?;

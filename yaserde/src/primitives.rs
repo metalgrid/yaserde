@@ -13,8 +13,11 @@ pub fn serialize_primitives<S, W: Write>(
     .unwrap_or_else(|| default_name.to_string());
 
   if !writer.skip_start_end() {
-    writer
-      .write_start_element(&name, ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
+    writer.write_start_element(
+      &name,
+      ::std::iter::empty::<(::std::string::String, ::std::string::String)>(),
+      ::std::iter::empty::<(::std::string::String, ::std::string::String)>(),
+    )?;
   }
 
   let content = serialize_function(self_bypass);

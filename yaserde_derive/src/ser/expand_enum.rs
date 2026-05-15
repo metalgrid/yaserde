@@ -171,7 +171,7 @@ fn inner_enum_inspector(
                   quote! {
                     match self {
                       &#name::#label { ref #field_label, .. } => {
-                        writer.write_start_element(#field_label_name, ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
+                        writer.write_start_element(#field_label_name, ::std::iter::empty(), ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
                         let string_value = #field_label.to_string();
                         writer.write_text(&string_value)?;
                         writer.write_end_element(#field_label_name)?;
@@ -226,7 +226,7 @@ fn inner_enum_inspector(
             .map(|field| {
               let write_element = |action: &TokenStream| {
                 quote! {
-                  writer.write_start_element(#label_name, ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
+                  writer.write_start_element(#label_name, ::std::iter::empty(), ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
                   #action
                   writer.write_end_element(#label_name)?;
                 }

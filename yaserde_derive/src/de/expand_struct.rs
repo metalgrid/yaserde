@@ -331,9 +331,9 @@ pub fn parse(
       match field.get_type() {
         Field::FieldString => set_text(&quote! { Some(text_content) }),
         Field::FieldOption { data_type } => match *data_type {
-          Field::FieldString => set_text(
-            &quote! { if text_content.is_empty() { None } else { Some(text_content) }},
-          ),
+          Field::FieldString => {
+            set_text(&quote! { if text_content.is_empty() { None } else { Some(text_content) }})
+          }
           _ => None,
         },
         Field::FieldStruct { .. } | Field::FieldVec { .. } => None,

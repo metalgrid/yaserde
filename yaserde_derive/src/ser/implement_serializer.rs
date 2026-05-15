@@ -43,11 +43,11 @@ pub fn implement_serializer(
             attributes,
             namespace,
           } = event {
-            let mut attributes: ::std::vec::Vec<::yaserde::__xml::attribute::OwnedAttribute> =
+            let mut attrs: ::std::vec::Vec<::yaserde::__xml::attribute::OwnedAttribute> =
               attributes.into_owned().to_vec().iter().map(|k| k.to_owned()).collect();
-            attributes.extend(child_attributes);
+            attrs.extend(child_attributes);
 
-            let all_attributes = attributes.iter().map(|ca| ca.borrow()).collect();
+            let all_attributes = attrs.iter().map(|ca| ca.borrow()).collect();
 
             let mut all_namespaces = namespace.into_owned();
             all_namespaces.extend(&child_attributes_namespace);

@@ -162,7 +162,7 @@ pub fn serialize(
       if field.is_cdata() {
         return quote! {
             #conditions {
-              writer.write_start_element(#label_name, ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
+              writer.write_start_element(#label_name, ::std::iter::empty(), ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
               writer.write_cdata(&self.#label)?;
               writer.write_end_element(#label_name)?;
             }

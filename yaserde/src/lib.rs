@@ -89,7 +89,6 @@ extern crate yaserde_derive;
 pub use yaserde_derive::*;
 
 use std::io::{Read, Write};
-use xml::writer::XmlEvent;
 
 pub mod de;
 pub mod primitives;

@@ -11,11 +11,11 @@ use std::io::{BufReader, Read};
 use xml::attribute::OwnedAttribute;
 use xml::name::OwnedName;
 use xml::namespace::Namespace;
-use xml::reader::{EventReader, XmlEvent};
+use xml::reader::XmlEvent;
 
-/// Lightweight event representation that avoids cloning the namespace map and
-/// attributes. Used by generated deserializers to avoid the cost of cloning
-/// the full `XmlEvent` on every loop iteration.
+/// Lightweight event for generated deserializer fast paths. Extracted directly
+/// from the internal cache without triggering namespace map or attribute
+/// vector construction.
 #[derive(Debug)]
 pub enum LightEvent {
   StartElement {
@@ -37,12 +37,31 @@ pub fn from_reader<R: Read, T: YaDeserialize>(reader: R) -> Result<T, String> {
   <T as YaDeserialize>::deserialize(&mut Deserializer::new_from_reader(reader))
 }
 
+/// Internal lightweight cached event. Stores name and attributes (extracted
+/// eagerly because they require the resolver state at read time) but defers
+/// namespace map construction until the public `XmlEvent` is materialized.
+enum InternalEvent {
+  StartElement {
+    name: OwnedName,
+    attributes: Vec<OwnedAttribute>,
+  },
+  EndElement {
+    name: OwnedName,
+  },
+  Characters(String),
+  EndDocument,
+}
+
 pub struct Deserializer<R: Read> {
   depth: usize,
   reader: NsReader<BufReader<R>>,
   buf: Vec<u8>,
-  peeked: Option<XmlEvent>,
-  pending: VecDeque<XmlEvent>,
+  /// Lightweight cached event from the last read.
+  cached: Option<InternalEvent>,
+  /// Pending end-element names for expanded empty elements.
+  pending_ends: VecDeque<OwnedName>,
+  /// Full public XmlEvent, materialized on demand from `cached`.
+  materialized: Option<XmlEvent>,
   eof: bool,
   started: bool,
 }
@@ -53,14 +72,15 @@ impl<R: Read> Deserializer<R> {
       depth: 0,
       reader,
       buf: Vec::new(),
-      peeked: None,
-      pending: VecDeque::new(),
+      cached: None,
+      pending_ends: VecDeque::new(),
+      materialized: None,
       eof: false,
       started: false,
     }
   }
 
-  pub fn new(reader: EventReader<R>) -> Self {
+  pub fn new(reader: xml::reader::EventReader<R>) -> Self {
     Self::new_from_reader(reader.into_inner())
   }
 
@@ -141,44 +161,18 @@ impl<R: Read> Deserializer<R> {
     Ok(attributes)
   }
 
-  fn start_element_to_xml_event(
-    reader: &NsReader<BufReader<R>>,
-    bytes_start: &BytesStart<'_>,
-  ) -> Result<XmlEvent, String> {
-    let qname = bytes_start.name();
-    let name = Self::qname_to_owned_name(qname, reader.resolver().resolve_element(qname).0)?;
-    let attributes = Self::attributes_to_owned(reader, bytes_start)?;
-    let namespace = Self::build_namespace(reader);
-
-    Ok(XmlEvent::StartElement {
-      name,
-      attributes,
-      namespace,
-    })
-  }
-
-  pub fn peek(&mut self) -> Result<&XmlEvent, String> {
-    if self.peeked.is_none() {
-      let event = self.inner_next()?;
-      self.peeked = Some(event);
-    }
-
-    if let Some(ref next) = self.peeked {
-      Ok(next)
-    } else {
-      Err("unable to peek next item".into())
-    }
-  }
-
-  pub fn inner_next(&mut self) -> Result<XmlEvent, String> {
+  /// Read the next quick-xml event and convert to an InternalEvent.
+  /// This extracts name and attributes eagerly (they require the resolver
+  /// state at read time) but does NOT build the namespace map.
+  fn read_internal(&mut self) -> Result<InternalEvent, String> {
     loop {
-      if let Some(event) = self.pending.pop_front() {
-        return Ok(event);
+      if let Some(name) = self.pending_ends.pop_front() {
+        return Ok(InternalEvent::EndElement { name });
       }
 
       if self.eof {
         if self.started {
-          return Ok(XmlEvent::EndDocument);
+          return Ok(InternalEvent::EndDocument);
         } else {
           return Err("Unexpected end of stream: no root element found".to_string());
         }
@@ -192,20 +186,30 @@ impl<R: Read> Deserializer<R> {
       match next {
         Event::Start(bytes_start) => {
           self.started = true;
-          return Self::start_element_to_xml_event(reader, &bytes_start);
+          let name = Self::qname_to_owned_name(
+            bytes_start.name(),
+            reader.resolver().resolve_element(bytes_start.name()).0,
+          )?;
+          let attributes = Self::attributes_to_owned(reader, &bytes_start)?;
+          return Ok(InternalEvent::StartElement { name, attributes });
         }
         Event::Empty(bytes_start) => {
           self.started = true;
-          let start_event = Self::start_element_to_xml_event(reader, &bytes_start)?;
-          let qname = bytes_start.name();
-          let name = Self::qname_to_owned_name(qname, reader.resolver().resolve_element(qname).0)?;
-          self.pending.push_back(XmlEvent::EndElement { name });
-          return Ok(start_event);
+          let name = Self::qname_to_owned_name(
+            bytes_start.name(),
+            reader.resolver().resolve_element(bytes_start.name()).0,
+          )?;
+          let attributes = Self::attributes_to_owned(reader, &bytes_start)?;
+          let end_name = name.clone();
+          self.pending_ends.push_back(end_name);
+          return Ok(InternalEvent::StartElement { name, attributes });
         }
         Event::End(bytes_end) => {
-          let qname = bytes_end.name();
-          let name = Self::qname_to_owned_name(qname, reader.resolver().resolve_element(qname).0)?;
-          return Ok(XmlEvent::EndElement { name });
+          let name = Self::qname_to_owned_name(
+            bytes_end.name(),
+            reader.resolver().resolve_element(bytes_end.name()).0,
+          )?;
+          return Ok(InternalEvent::EndElement { name });
         }
         Event::Text(bytes_text) => {
           let decoded = bytes_text.decode().map_err(|e| e.to_string())?;
@@ -214,20 +218,20 @@ impl<R: Read> Deserializer<R> {
           if trimmed.is_empty() {
             continue;
           }
-          return Ok(XmlEvent::Characters(trimmed.to_owned()));
+          return Ok(InternalEvent::Characters(trimmed.to_owned()));
         }
         Event::CData(bytes_cdata) => {
           let text = bytes_cdata
             .decode()
             .map_err(|e| e.to_string())?
             .into_owned();
-          return Ok(XmlEvent::Characters(text));
+          return Ok(InternalEvent::Characters(text));
         }
         Event::Decl(_) | Event::PI(_) | Event::Comment(_) | Event::DocType(_) => {}
         Event::Eof => {
           self.eof = true;
           if self.started {
-            return Ok(XmlEvent::EndDocument);
+            return Ok(InternalEvent::EndDocument);
           } else {
             return Err("Unexpected end of stream: no root element found".to_string());
           }
@@ -237,88 +241,141 @@ impl<R: Read> Deserializer<R> {
     }
   }
 
-  pub fn next_event(&mut self) -> Result<XmlEvent, String> {
-    let next_event = if let Some(peeked) = self.peeked.take() {
-      peeked
-    } else {
-      self.inner_next()?
-    };
-    match next_event {
-      XmlEvent::StartElement { .. } => {
-        self.depth += 1;
-      }
-      XmlEvent::EndElement { .. } => {
-        self.depth -= 1;
-      }
-      _ => {}
+  /// Ensure the internal cache is populated (either cached or materialized).
+  fn ensure_cached(&mut self) -> Result<(), String> {
+    if self.cached.is_none() && self.materialized.is_none() {
+      let event = self.read_internal()?;
+      self.cached = Some(event);
     }
-    log::debug!("Fetched {:?}, new depth {}", next_event, self.depth);
-    Ok(next_event)
+    Ok(())
   }
 
-  /// Peek and return a lightweight summary of the current event, avoiding
-  /// the cost of cloning the full namespace map and attribute vector.
-  /// The full event remains cached in the deserializer for subsequent
-  /// `peek()`, `next_event()`, or `peek_attributes()` calls.
+  /// Materialize the cached InternalEvent into a full XmlEvent with namespace
+  /// map. No-op if already materialized.
+  fn materialize_event(&mut self) -> Result<(), String> {
+    if self.materialized.is_some() {
+      return Ok(());
+    }
+    self.ensure_cached()?;
+    let cached = self.cached.take();
+    if let Some(internal) = cached {
+      let xml_event = match internal {
+        InternalEvent::StartElement { name, attributes } => {
+          let namespace = Self::build_namespace(&self.reader);
+          XmlEvent::StartElement {
+            name,
+            attributes,
+            namespace,
+          }
+        }
+        InternalEvent::EndElement { name } => XmlEvent::EndElement { name },
+        InternalEvent::Characters(s) => XmlEvent::Characters(s),
+        InternalEvent::EndDocument => XmlEvent::EndDocument,
+      };
+      self.materialized = Some(xml_event);
+    }
+    Ok(())
+  }
+
+  // ── Public API ──────────────────────────────────────────────────────────
+
+  /// Peek at the next event as a full xml-rs `XmlEvent`. Materializes the
+  /// namespace map and attributes on first call; returns a reference to the
+  /// cached materialized event on subsequent calls.
+  pub fn peek(&mut self) -> Result<&XmlEvent, String> {
+    self.materialize_event()?;
+    self
+      .materialized
+      .as_ref()
+      .ok_or_else(|| "unable to peek next item".to_string())
+  }
+
+  /// Peek at the next event in lightweight form. Does NOT trigger namespace
+  /// map construction. This is the primary peek method for generated
+  /// deserializer fast paths.
   pub fn peek_light(&mut self) -> Result<LightEvent, String> {
-    match self.peek()? {
-      XmlEvent::StartElement { name, .. } => Ok(LightEvent::StartElement {
+    self.ensure_cached()?;
+
+    // If already materialized, extract from the full event.
+    if let Some(ref event) = self.materialized {
+      return Ok(light_from_xml_event(event));
+    }
+
+    // Extract from the lightweight cache — no namespace map built.
+    match self.cached.as_ref() {
+      Some(InternalEvent::StartElement { name, .. }) => Ok(LightEvent::StartElement {
         local_name: name.local_name.clone(),
         namespace: name.namespace.clone(),
       }),
-      XmlEvent::EndElement { name } => Ok(LightEvent::EndElement {
+      Some(InternalEvent::EndElement { name }) => Ok(LightEvent::EndElement {
         local_name: name.local_name.clone(),
       }),
-      XmlEvent::Characters(s) => Ok(LightEvent::Characters(s.clone())),
-      XmlEvent::EndDocument => Ok(LightEvent::EndDocument),
-      other => Err(format!("unexpected event: {:?}", other)),
+      Some(InternalEvent::Characters(s)) => Ok(LightEvent::Characters(s.clone())),
+      Some(InternalEvent::EndDocument) => Ok(LightEvent::EndDocument),
+      None => Err("unable to peek next item".to_string()),
     }
   }
 
-  /// Peek the attributes of the current StartElement event without cloning
-  /// the namespace map. Returns `None` if the peeked event is not a
-  /// `StartElement`.
+  /// Get the attributes of the peeked StartElement without building the
+  /// namespace map. Returns `None` if the peeked event is not a StartElement.
+  /// The returned vector is cloned from the internal cache.
   pub fn peek_attributes(&mut self) -> Result<Option<Vec<OwnedAttribute>>, String> {
-    match self.peek()? {
-      XmlEvent::StartElement { attributes, .. } => Ok(Some(attributes.clone())),
+    self.ensure_cached()?;
+
+    if let Some(XmlEvent::StartElement { attributes, .. }) = &self.materialized {
+      return Ok(Some(attributes.clone()));
+    }
+
+    match &self.cached {
+      Some(InternalEvent::StartElement { attributes, .. }) => Ok(Some(attributes.clone())),
       _ => Ok(None),
     }
   }
 
-  /// Consume the current StartElement event (which must have been peeked first)
-  /// and return its local name. Used by generated deserializers to consume
-  /// root elements without materializing the full event.
-  pub fn consume_start_element(&mut self) -> Result<String, String> {
-    let event = self.next_event()?;
-    match event {
-      XmlEvent::StartElement { name, .. } => Ok(name.local_name),
-      _ => Err("expected StartElement".to_string()),
+  /// Consume and return the next full `XmlEvent`. If the event was
+  /// materialized by a prior `peek()`, returns that. Otherwise materializes
+  /// on the fly (including namespace map for StartElement).
+  pub fn next_event(&mut self) -> Result<XmlEvent, String> {
+    // If already materialized by peek(), consume it.
+    if let Some(event) = self.materialized.take() {
+      match event {
+        XmlEvent::StartElement { .. } => self.depth += 1,
+        XmlEvent::EndElement { .. } => self.depth -= 1,
+        _ => {}
+      }
+      log::debug!("Fetched {:?}, new depth {}", event, self.depth);
+      return Ok(event);
     }
-  }
 
-  /// Read text content between start and end tags. The caller must have
-  /// already consumed the StartElement. This reads events until it finds
-  /// Characters or the matching EndElement, returning the text content
-  /// (or empty string if no Characters event found).
-  pub fn read_text_content(&mut self) -> Result<String, String> {
-    loop {
-      match self.peek_light()? {
-        LightEvent::Characters(text) => {
-          self.next_event()?;
-          return Ok(text);
-        }
-        LightEvent::EndElement { .. } => {
-          return Ok(String::new());
-        }
-        LightEvent::StartElement { .. } => {
-          self.next_event()?;
-          self.skip_element(|_| {})?;
-        }
-        LightEvent::EndDocument => {
-          return Ok(String::new());
+    // Otherwise, consume from the lightweight cache and materialize inline.
+    self.ensure_cached()?;
+    let cached = self.cached.take();
+    let event = match cached {
+      Some(InternalEvent::StartElement { name, attributes }) => {
+        let namespace = Self::build_namespace(&self.reader);
+        self.depth += 1;
+        XmlEvent::StartElement {
+          name,
+          attributes,
+          namespace,
         }
       }
-    }
+      Some(InternalEvent::EndElement { name }) => {
+        self.depth -= 1;
+        XmlEvent::EndElement { name }
+      }
+      Some(InternalEvent::Characters(s)) => XmlEvent::Characters(s),
+      Some(InternalEvent::EndDocument) => XmlEvent::EndDocument,
+      None => return Err("no event available".to_string()),
+    };
+
+    log::debug!("Fetched {:?}, new depth {}", event, self.depth);
+    Ok(event)
+  }
+
+  /// Compatibility alias kept for any manual consumers. Prefer `next_event()`.
+  pub fn inner_next(&mut self) -> Result<XmlEvent, String> {
+    self.next_event()
   }
 
   pub fn skip_element(&mut self, mut cb: impl FnMut(&XmlEvent)) -> Result<(), String> {
@@ -361,6 +418,21 @@ impl<R: Read> Deserializer<R> {
     } else {
       Err(format!("Unexpected token </{}>", start_name.local_name))
     }
+  }
+}
+
+fn light_from_xml_event(event: &XmlEvent) -> LightEvent {
+  match event {
+    XmlEvent::StartElement { name, .. } => LightEvent::StartElement {
+      local_name: name.local_name.clone(),
+      namespace: name.namespace.clone(),
+    },
+    XmlEvent::EndElement { name } => LightEvent::EndElement {
+      local_name: name.local_name.clone(),
+    },
+    XmlEvent::Characters(s) => LightEvent::Characters(s.clone()),
+    XmlEvent::EndDocument => LightEvent::EndDocument,
+    other => panic!("unexpected event: {:?}", other),
   }
 }
 
