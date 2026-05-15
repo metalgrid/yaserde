@@ -149,12 +149,10 @@ pub fn serialize(
         return match field.get_type() {
           Field::FieldOption { .. } => Some(quote!(
             let s = self.#label.as_deref().unwrap_or_default();
-            let data_event = ::yaserde::__xml::writer::XmlEvent::characters(s);
-            writer.write(data_event).map_err(|e| e.to_string())?;
+            writer.write_text(s)?;
           )),
           _ => Some(quote!(
-            let data_event = ::yaserde::__xml::writer::XmlEvent::characters(&self.#label);
-            writer.write(data_event).map_err(|e| e.to_string())?;
+            writer.write_text(&self.#label.to_string())?;
           )),
         };
       }
@@ -164,12 +162,9 @@ pub fn serialize(
       if field.is_cdata() {
         return quote! {
             #conditions {
-              let start_event = ::yaserde::__xml::writer::XmlEvent::start_element(#label_name);
-              writer.write(start_event).map_err(|e| e.to_string())?;
-              let data = ::yaserde::__xml::writer::events::XmlEvent::cdata(&self.#label);
-              writer.write(data).map_err(|e| e.to_string())?;
-              let end_event = ::yaserde::__xml::writer::XmlEvent::end_element();
-              writer.write(end_event).map_err(|e| e.to_string())?;
+              writer.write_start_element(#label_name, ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
+              writer.write_cdata(&self.#label)?;
+              writer.write_end_element(#label_name)?;
             }
         }.into()
       }

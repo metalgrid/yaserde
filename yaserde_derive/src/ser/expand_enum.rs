@@ -133,8 +133,7 @@ fn inner_enum_inspector(
           } else {
             quote! {
               #name::#label => {
-                let data_event = ::yaserde::__xml::writer::XmlEvent::characters(#label_name);
-                writer.write(data_event).map_err(|e| e.to_string())?;
+                writer.write_text(#label_name)?;
               }
             }
           }
@@ -150,8 +149,7 @@ fn inner_enum_inspector(
 
               if field.is_text_content() {
                 return Some(quote!(
-                  let data_event = ::yaserde::__xml::writer::XmlEvent::characters(&self.#field_label);
-                  writer.write(data_event).map_err(|e| e.to_string())?;
+                  writer.write_text(&self.#field_label.to_string())?;
                 ));
               }
 
@@ -173,16 +171,10 @@ fn inner_enum_inspector(
                   quote! {
                     match self {
                       &#name::#label { ref #field_label, .. } => {
-                        let struct_start_event =
-                          ::yaserde::__xml::writer::XmlEvent::start_element(#field_label_name);
-                        writer.write(struct_start_event).map_err(|e| e.to_string())?;
-
+                        writer.write_start_element(#field_label_name, ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
                         let string_value = #field_label.to_string();
-                        let data_event = ::yaserde::__xml::writer::XmlEvent::characters(&string_value);
-                        writer.write(data_event).map_err(|e| e.to_string())?;
-
-                        let struct_end_event = ::yaserde::__xml::writer::XmlEvent::end_element();
-                        writer.write(struct_end_event).map_err(|e| e.to_string())?;
+                        writer.write_text(&string_value)?;
+                        writer.write_end_element(#field_label_name)?;
                       },
                       _ => {},
                     }
@@ -234,25 +226,19 @@ fn inner_enum_inspector(
             .map(|field| {
               let write_element = |action: &TokenStream| {
                 quote! {
-                  let struct_start_event = ::yaserde::__xml::writer::XmlEvent::start_element(#label_name);
-                  writer.write(struct_start_event).map_err(|e| e.to_string())?;
-
+                  writer.write_start_element(#label_name, ::std::iter::empty::<(::std::string::String, ::std::string::String)>())?;
                   #action
-
-                  let struct_end_event = ::yaserde::__xml::writer::XmlEvent::end_element();
-                  writer.write(struct_end_event).map_err(|e| e.to_string())?;
+                  writer.write_end_element(#label_name)?;
                 }
               };
 
               let write_string_chars = quote! {
-                let data_event = ::yaserde::__xml::writer::XmlEvent::characters(item);
-                writer.write(data_event).map_err(|e| e.to_string())?;
+                writer.write_text(item)?;
               };
 
               let write_simple_type = write_element(&quote! {
                 let s = item.to_string();
-                let data_event = ::yaserde::__xml::writer::XmlEvent::characters(&s);
-                writer.write(data_event).map_err(|e| e.to_string())?;
+                writer.write_text(&s)?;
               });
 
               let serialize = quote! {
