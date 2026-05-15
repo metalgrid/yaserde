@@ -13,6 +13,22 @@ use xml::name::OwnedName;
 use xml::namespace::Namespace;
 use xml::reader::{EventReader, XmlEvent};
 
+/// Lightweight event representation that avoids cloning the namespace map and
+/// attributes. Used by generated deserializers to avoid the cost of cloning
+/// the full `XmlEvent` on every loop iteration.
+#[derive(Debug)]
+pub enum LightEvent {
+  StartElement {
+    local_name: String,
+    namespace: Option<String>,
+  },
+  EndElement {
+    local_name: String,
+  },
+  Characters(String),
+  EndDocument,
+}
+
 pub fn from_str<T: YaDeserialize>(s: &str) -> Result<T, String> {
   from_reader(s.as_bytes())
 }
@@ -238,6 +254,71 @@ impl<R: Read> Deserializer<R> {
     }
     log::debug!("Fetched {:?}, new depth {}", next_event, self.depth);
     Ok(next_event)
+  }
+
+  /// Peek and return a lightweight summary of the current event, avoiding
+  /// the cost of cloning the full namespace map and attribute vector.
+  /// The full event remains cached in the deserializer for subsequent
+  /// `peek()`, `next_event()`, or `peek_attributes()` calls.
+  pub fn peek_light(&mut self) -> Result<LightEvent, String> {
+    match self.peek()? {
+      XmlEvent::StartElement { name, .. } => Ok(LightEvent::StartElement {
+        local_name: name.local_name.clone(),
+        namespace: name.namespace.clone(),
+      }),
+      XmlEvent::EndElement { name } => Ok(LightEvent::EndElement {
+        local_name: name.local_name.clone(),
+      }),
+      XmlEvent::Characters(s) => Ok(LightEvent::Characters(s.clone())),
+      XmlEvent::EndDocument => Ok(LightEvent::EndDocument),
+      other => Err(format!("unexpected event: {:?}", other)),
+    }
+  }
+
+  /// Peek the attributes of the current StartElement event without cloning
+  /// the namespace map. Returns `None` if the peeked event is not a
+  /// `StartElement`.
+  pub fn peek_attributes(&mut self) -> Result<Option<Vec<OwnedAttribute>>, String> {
+    match self.peek()? {
+      XmlEvent::StartElement { attributes, .. } => Ok(Some(attributes.clone())),
+      _ => Ok(None),
+    }
+  }
+
+  /// Consume the current StartElement event (which must have been peeked first)
+  /// and return its local name. Used by generated deserializers to consume
+  /// root elements without materializing the full event.
+  pub fn consume_start_element(&mut self) -> Result<String, String> {
+    let event = self.next_event()?;
+    match event {
+      XmlEvent::StartElement { name, .. } => Ok(name.local_name),
+      _ => Err("expected StartElement".to_string()),
+    }
+  }
+
+  /// Read text content between start and end tags. The caller must have
+  /// already consumed the StartElement. This reads events until it finds
+  /// Characters or the matching EndElement, returning the text content
+  /// (or empty string if no Characters event found).
+  pub fn read_text_content(&mut self) -> Result<String, String> {
+    loop {
+      match self.peek_light()? {
+        LightEvent::Characters(text) => {
+          self.next_event()?;
+          return Ok(text);
+        }
+        LightEvent::EndElement { .. } => {
+          return Ok(String::new());
+        }
+        LightEvent::StartElement { .. } => {
+          self.next_event()?;
+          self.skip_element(|_| {})?;
+        }
+        LightEvent::EndDocument => {
+          return Ok(String::new());
+        }
+      }
+    }
   }
 
   pub fn skip_element(&mut self, mut cb: impl FnMut(&XmlEvent)) -> Result<(), String> {
