@@ -237,27 +237,13 @@ fn build_unnamed_visitor_calls(
 
       let call_simple_type_visitor = |simple_type: Field, action| {
         let visitor = simple_type.get_simple_type_visitor();
-        let field_type: TokenStream = simple_type.into();
-
-        let label_name = format!("field_{}", idx);
 
         Some(quote! {
           let visitor = #visitor_label{};
 
-          let result = reader.read_inner_value::<#field_type, _>(|reader| {
-            if let ::yaserde::de::LightEvent::EndElement { .. } = reader.peek_light()? {
-              return visitor.#visitor("");
-            }
-
-            if let ::std::result::Result::Ok(::yaserde::__xml::reader::XmlEvent::Characters(s))
-              = reader.next_event()
-            {
-              visitor.#visitor(&s)
-            } else {
-              ::std::result::Result::Err(
-                ::std::format!("unable to parse content for {}", #label_name),
-              )
-            }
+          let result = reader.read_inner_text_light().and_then(|text_opt| {
+            let s = text_opt.as_deref().unwrap_or("");
+            visitor.#visitor(s)
           });
 
           if let ::std::result::Result::Ok(value) = result {

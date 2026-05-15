@@ -419,6 +419,96 @@ impl<R: Read> Deserializer<R> {
       Err(format!("Unexpected token </{}>", start_name.local_name))
     }
   }
+
+  /// Lightweight alternative to `read_inner_value()` for simple text fields.
+  /// Assumes the next event in the cache is a StartElement that has already
+  /// been matched by the caller (e.g. via `peek_light()`). Consumes the
+  /// start element, reads optional text content, and consumes the matching
+  /// end element — all without materializing public `XmlEvent`s or namespace
+  /// maps.
+  ///
+  /// Returns `Ok(Some(text))` for elements with text content, `Ok(None)` for
+  /// empty elements (including `<foo />` self-closing tags). For empty
+  /// elements, the EndElement is placed back in the lightweight cache so
+  /// the caller's loop can handle depth tracking.
+  pub fn read_inner_text_light(&mut self) -> Result<Option<String>, String> {
+    self.ensure_cached()?;
+
+    // Step 1: Consume the start element from whichever cache holds it.
+    let start_name = if let Some(event) = self.materialized.take() {
+      match event {
+        XmlEvent::StartElement { name, .. } => {
+          self.depth += 1;
+          name
+        }
+        _ => return Err("Internal error: expected StartElement".to_string()),
+      }
+    } else {
+      match self.cached.take() {
+        Some(InternalEvent::StartElement { name, .. }) => {
+          self.depth += 1;
+          name
+        }
+        Some(other) => {
+          self.cached = Some(other);
+          return Err("Internal error: expected StartElement".to_string());
+        }
+        None => return Err("no event available".to_string()),
+      }
+    };
+
+    // Step 2: Read next event — should be Characters or EndElement.
+    let next = self.read_internal()?;
+    match next {
+      InternalEvent::Characters(s) => {
+        // Step 3: Read matching end element.
+        let end = self.read_internal()?;
+        match &end {
+          InternalEvent::EndElement { name } if *name == start_name => {
+            self.depth -= 1;
+          }
+          InternalEvent::EndElement { name } => {
+            self.depth -= 1;
+            return Err(format!(
+              "End tag </{}> didn't match the start tag <{}>",
+              name.local_name, start_name.local_name
+            ));
+          }
+          _ => {
+            self.cached = Some(end);
+            return Err(format!("Expected end tag </{}>", start_name.local_name));
+          }
+        }
+        Ok(Some(s))
+      }
+      // Empty element: put EndElement back so the caller's loop handles
+      // depth tracking (matches original `read_inner_value` behavior where
+      // the closure fails and `expect_end_element` is never called).
+      InternalEvent::EndElement { name } if name == start_name => {
+        self.cached = Some(InternalEvent::EndElement { name });
+        Ok(None)
+      }
+      InternalEvent::EndElement { name } => {
+        let local = name.local_name.clone();
+        self.cached = Some(InternalEvent::EndElement { name });
+        Err(format!(
+          "End tag </{}> didn't match the start tag <{}>",
+          local, start_name.local_name
+        ))
+      }
+      InternalEvent::StartElement { .. } => {
+        self.cached = Some(next);
+        Err(format!(
+          "Expected text content in <{}>",
+          start_name.local_name
+        ))
+      }
+      InternalEvent::EndDocument => Err(format!(
+        "Unexpected end of document in <{}>",
+        start_name.local_name
+      )),
+    }
+  }
 }
 
 fn light_from_xml_event(event: &XmlEvent) -> LightEvent {

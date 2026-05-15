@@ -482,7 +482,7 @@ pub fn parse(
 }
 
 fn build_call_visitor(
-  field_type: &TokenStream,
+  _field_type: &TokenStream,
   visitor: &Ident,
   action: &TokenStream,
   field: &YaSerdeField,
@@ -506,13 +506,12 @@ fn build_call_visitor(
 
       #namespaces_matching
 
-      let result = reader.read_inner_value::<#field_type, _>(|reader| {
-        if let ::std::result::Result::Ok(::yaserde::__xml::reader::XmlEvent::Characters(s)) = reader.peek() {
-          let val = visitor.#visitor(&s);
-          let _event = reader.next_event()?;
-          val
-        } else {
-          ::std::result::Result::Err(::std::format!("unable to parse content for {}", #label_name))
+      let result = reader.read_inner_text_light().and_then(|text_opt| {
+        match text_opt {
+          ::std::option::Option::Some(s) => visitor.#visitor(&s),
+          ::std::option::Option::None => ::std::result::Result::Err(
+            ::std::format!("unable to parse content for {}", #label_name)
+          ),
         }
       });
 
