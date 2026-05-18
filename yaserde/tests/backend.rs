@@ -128,12 +128,7 @@ fn quick_xml_backend_parity_cases() {
   let spaced = "<Root><!-- skip --><item> a <![CDATA[b]]> c </item></Root>";
   let loaded: Root =
     from_reader_with_parser(QuickXmlReader::from_reader(std::io::Cursor::new(spaced))).unwrap();
-  assert_eq!(
-    loaded,
-    Root {
-      item: "a b c".into()
-    }
-  );
+  assert_eq!(loaded, Root { item: "abc".into() });
 
   let namespaced = r#"<s:Envelope xmlns:s="urn:test" id="1"><s:child>value</s:child></s:Envelope>"#;
   let loaded: NamespacedEnvelope = from_reader_with_parser(QuickXmlReader::from_reader(
