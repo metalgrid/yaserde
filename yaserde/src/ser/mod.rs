@@ -1,11 +1,12 @@
 //! Generic data structure serialization framework.
 //!
 
+use crate::xml::{XmlAttribute, XmlNamespace, XmlWriteEvent};
 use crate::YaSerialize;
+use ::xml::writer::XmlEvent;
+use ::xml::{EmitterConfig, EventWriter};
 use std::io::{Cursor, Write};
 use std::str;
-use xml::writer::XmlEvent;
-use xml::{EmitterConfig, EventWriter};
 
 /// Serialize XML into a plain String with no formatting (EmitterConfig).
 pub fn to_string<T: YaSerialize>(model: &T) -> Result<String, String> {
@@ -108,11 +109,70 @@ impl<W: Write> Serializer<W> {
     self.start_event_name = name;
   }
 
-  pub fn write<'a, E>(&mut self, event: E) -> xml::writer::Result<()>
+  pub fn write<'a, E>(&mut self, event: E) -> ::xml::writer::Result<()>
   where
     E: Into<XmlEvent<'a>>,
   {
     self.writer.write(event)
+  }
+
+  pub fn write_event(&mut self, event: XmlWriteEvent<'_>) -> Result<(), String> {
+    match event {
+      XmlWriteEvent::StartElement {
+        name,
+        attributes,
+        namespace,
+      } => self.write_start_element(name.into_owned(), attributes, namespace),
+      XmlWriteEvent::EndElement => self.write_end_element(),
+      XmlWriteEvent::Characters(text) => self.write_characters(&text),
+      XmlWriteEvent::CData(text) => self.write_cdata(&text),
+    }
+  }
+
+  pub fn write_start_element<S: Into<String>>(
+    &mut self,
+    name: S,
+    attributes: Vec<XmlAttribute>,
+    namespace: XmlNamespace,
+  ) -> Result<(), String> {
+    let name = ::xml::name::OwnedName::local(name.into());
+    let attributes: Vec<_> = attributes
+      .iter()
+      .map(|attribute| attribute.to_xml_rs())
+      .collect();
+    let attributes = attributes
+      .iter()
+      .map(|attribute| attribute.borrow())
+      .collect();
+    self
+      .writer
+      .write(::xml::writer::events::XmlEvent::StartElement {
+        name: name.borrow(),
+        attributes: ::std::borrow::Cow::Owned(attributes),
+        namespace: ::std::borrow::Cow::Owned(namespace.to_xml_rs()),
+      })
+      .map_err(|e| e.to_string())
+  }
+
+  pub fn write_end_element(&mut self) -> Result<(), String> {
+    self
+      .writer
+      .write(::xml::writer::XmlEvent::end_element())
+      .map_err(|e| e.to_string())
+  }
+
+  pub fn write_characters(&mut self, text: &str) -> Result<(), String> {
+    self
+      .writer
+      .write(::xml::writer::XmlEvent::characters(text))
+      .map_err(|e| e.to_string())
+  }
+
+  pub fn write_cdata(&mut self, text: &str) -> Result<(), String> {
+    self
+      .writer
+      .write(::xml::writer::events::XmlEvent::cdata(text))
+      .map_err(|e| e.to_string())
   }
 }
 
