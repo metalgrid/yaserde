@@ -12,11 +12,15 @@ readme = "../README.md"
 edition = "2018"
 
 [features]
+default = ["xml-rs-backend"]
 derive = ["yaserde_derive"]
+xml-rs-backend = []
+quick-xml-backend = ["quick-xml"]
 
 [dependencies]
 yaserde_derive = { version = "0.12.0", path = "../yaserde_derive", optional = true }
 xml-rs = "0.8.3"
+quick-xml = { version = "0.37", optional = true }
 log = "0.4"
 
 [dev-dependencies]
