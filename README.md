@@ -38,7 +38,10 @@ To implement it, define the implementation of YaDeserialize/YaSerialize
 
 ```rust
 impl YaDeserialize for MyType {
-  fn deserialize<R: Read>(reader: &mut yaserde::de::Deserializer<R>) -> Result<Self, String> {
+  fn deserialize<P: yaserde::xml::XmlEventReader>(
+    reader: &mut yaserde::de::Deserializer<P>,
+  ) -> Result<Self, String> {
+    // match on yaserde::xml::XmlReadEvent values from reader.peek()/next_event()
     // deserializer code
   }
 }
@@ -52,3 +55,22 @@ impl YaSerialize for MyType {
   }
 }
 ```
+
+## XML parser backends
+
+YaSerDe's deserializer is generic over `yaserde::xml::XmlEventReader`, so parser backends can be selected explicitly:
+
+```rust
+let parser = yaserde::xml::XmlRsReader::from_reader(xml.as_bytes());
+let value: MyType = yaserde::de::from_reader_with_parser(parser)?;
+```
+
+Enable the faster quick-xml backend with:
+
+```toml
+yaserde = { version = "...", features = ["quick-xml-backend"] }
+```
+
+When `quick-xml-backend` is enabled, `yaserde::de::from_str` and `from_reader` use quick-xml by default. For runtime selection, pass a `Box<dyn yaserde::xml::XmlEventReader>` to `yaserde::de::from_reader_dyn`.
+
+Migration note: custom deserializers should use `yaserde::xml::XmlReadEvent` instead of matching `xml::reader::XmlEvent` directly.
