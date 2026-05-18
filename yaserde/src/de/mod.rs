@@ -1,7 +1,7 @@
 //! Generic data structure deserialization framework.
 //!
 
-use crate::xml::{XmlEventReader, XmlName, XmlReadEvent};
+use crate::xml::{XmlAttribute, XmlEventReader, XmlLightEvent, XmlName, XmlReadEvent};
 use crate::YaDeserialize;
 use std::io::Read;
 
@@ -63,6 +63,18 @@ impl<P: XmlEventReader> Deserializer<P> {
     }
   }
 
+  pub fn peek_light(&mut self) -> Result<XmlLightEvent, String> {
+    if let Some(ref peeked) = self.peeked {
+      return Ok(XmlLightEvent::from(peeked));
+    }
+
+    if self.reader.supports_light_events() {
+      self.reader.peek_light_event()
+    } else {
+      Ok(XmlLightEvent::from(self.peek()?))
+    }
+  }
+
   pub fn inner_next(&mut self) -> Result<XmlReadEvent, String> {
     self.reader.next_event()
   }
@@ -73,17 +85,37 @@ impl<P: XmlEventReader> Deserializer<P> {
     } else {
       self.inner_next()?
     };
-    match next_event {
-      XmlReadEvent::StartElement { .. } => {
-        self.depth += 1;
-      }
-      XmlReadEvent::EndElement { .. } => {
-        self.depth -= 1;
-      }
-      _ => {}
-    }
+    self.update_depth_for_read_event(&next_event);
     log::debug!("Fetched {:?}, new depth {}", next_event, self.depth);
     Ok(next_event)
+  }
+
+  pub fn next_light_event(&mut self) -> Result<XmlLightEvent, String> {
+    let next_event = if let Some(peeked) = self.peeked.take() {
+      XmlLightEvent::from(&peeked)
+    } else if self.reader.supports_light_events() {
+      self.reader.next_light_event()?
+    } else {
+      XmlLightEvent::from(&self.inner_next()?)
+    };
+    self.update_depth_for_light_event(&next_event);
+    log::debug!("Fetched {:?}, new depth {}", next_event, self.depth);
+    Ok(next_event)
+  }
+
+  pub fn peek_attributes(&mut self) -> Result<Option<Vec<XmlAttribute>>, String> {
+    if let Some(XmlReadEvent::StartElement { attributes, .. }) = &self.peeked {
+      return Ok(Some(attributes.clone()));
+    }
+
+    if self.reader.supports_light_events() {
+      self.reader.peek_attributes()
+    } else {
+      match self.peek()? {
+        XmlReadEvent::StartElement { attributes, .. } => Ok(Some(attributes.clone())),
+        _ => Ok(None),
+      }
+    }
   }
 
   pub fn skip_element(&mut self, mut cb: impl FnMut(&XmlReadEvent)) -> Result<(), String> {
@@ -113,6 +145,34 @@ impl<P: XmlEventReader> Deserializer<P> {
     }
   }
 
+  pub fn read_inner_text_light(&mut self) -> Result<Option<String>, String> {
+    if self.peeked.is_none() && self.reader.supports_light_events() {
+      let text = self.reader.read_inner_text()?;
+      if text.is_none() {
+        self.depth += 1;
+      }
+      return Ok(text);
+    }
+
+    if let Ok(XmlReadEvent::StartElement { name, .. }) = self.next_event() {
+      match self.peek()? {
+        XmlReadEvent::Characters(_) => {
+          let text = if let XmlReadEvent::Characters(text) = self.next_event()? {
+            text
+          } else {
+            unreachable!()
+          };
+          self.expect_end_element(&name)?;
+          Ok(Some(text))
+        }
+        XmlReadEvent::EndElement { .. } => Ok(None),
+        _ => Err(format!("Expected text content in <{}>", name.local_name)),
+      }
+    } else {
+      Err("Internal error: Bad Event".to_string())
+    }
+  }
+
   pub fn expect_end_element(&mut self, start_name: &XmlName) -> Result<(), String> {
     if let XmlReadEvent::EndElement { name, .. } = self.next_event()? {
       if name == *start_name {
@@ -125,6 +185,22 @@ impl<P: XmlEventReader> Deserializer<P> {
       }
     } else {
       Err(format!("Unexpected token </{}>", start_name.local_name))
+    }
+  }
+
+  fn update_depth_for_read_event(&mut self, event: &XmlReadEvent) {
+    match event {
+      XmlReadEvent::StartElement { .. } => self.depth += 1,
+      XmlReadEvent::EndElement { .. } => self.depth -= 1,
+      _ => {}
+    }
+  }
+
+  fn update_depth_for_light_event(&mut self, event: &XmlLightEvent) {
+    match event {
+      XmlLightEvent::StartElement { .. } => self.depth += 1,
+      XmlLightEvent::EndElement { .. } => self.depth -= 1,
+      _ => {}
     }
   }
 }
