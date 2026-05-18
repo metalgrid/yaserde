@@ -190,6 +190,36 @@ impl XmlReadEvent {
   }
 }
 
+/// Parser-neutral lightweight XML event for generated deserializer fast paths.
+#[derive(Clone, Debug, PartialEq)]
+pub enum XmlLightEvent {
+  StartElement {
+    local_name: String,
+    namespace: Option<String>,
+  },
+  EndElement {
+    local_name: String,
+  },
+  Characters(String),
+  EndDocument,
+}
+
+impl From<&XmlReadEvent> for XmlLightEvent {
+  fn from(event: &XmlReadEvent) -> Self {
+    match event {
+      XmlReadEvent::StartElement { name, .. } => XmlLightEvent::StartElement {
+        local_name: name.local_name.clone(),
+        namespace: name.namespace.clone(),
+      },
+      XmlReadEvent::EndElement { name } => XmlLightEvent::EndElement {
+        local_name: name.local_name.clone(),
+      },
+      XmlReadEvent::Characters(text) => XmlLightEvent::Characters(text.clone()),
+      XmlReadEvent::EndDocument => XmlLightEvent::EndDocument,
+    }
+  }
+}
+
 /// Parser-neutral XML write events. Serialization still uses the xml-rs writer backend
 /// initially, but this type is the boundary for backend-neutral writers.
 #[derive(Clone, Debug, PartialEq)]
@@ -207,11 +237,51 @@ pub enum XmlWriteEvent<'a> {
 /// Low-level pull-reader trait implemented by XML parser backends.
 pub trait XmlEventReader {
   fn next_event(&mut self) -> Result<XmlReadEvent, String>;
+
+  fn supports_light_events(&self) -> bool {
+    false
+  }
+
+  fn peek_light_event(&mut self) -> Result<XmlLightEvent, String> {
+    Err("light events are not supported by this backend".to_string())
+  }
+
+  fn next_light_event(&mut self) -> Result<XmlLightEvent, String> {
+    Ok(XmlLightEvent::from(&self.next_event()?))
+  }
+
+  fn peek_attributes(&mut self) -> Result<Option<Vec<XmlAttribute>>, String> {
+    Err("attribute peeking is not supported by this backend".to_string())
+  }
+
+  fn read_inner_text(&mut self) -> Result<Option<String>, String> {
+    Err("inner text fast path is not supported by this backend".to_string())
+  }
 }
 
 impl<T: XmlEventReader + ?Sized> XmlEventReader for Box<T> {
   fn next_event(&mut self) -> Result<XmlReadEvent, String> {
     self.as_mut().next_event()
+  }
+
+  fn supports_light_events(&self) -> bool {
+    self.as_ref().supports_light_events()
+  }
+
+  fn peek_light_event(&mut self) -> Result<XmlLightEvent, String> {
+    self.as_mut().peek_light_event()
+  }
+
+  fn next_light_event(&mut self) -> Result<XmlLightEvent, String> {
+    self.as_mut().next_light_event()
+  }
+
+  fn peek_attributes(&mut self) -> Result<Option<Vec<XmlAttribute>>, String> {
+    self.as_mut().peek_attributes()
+  }
+
+  fn read_inner_text(&mut self) -> Result<Option<String>, String> {
+    self.as_mut().read_inner_text()
   }
 }
 
@@ -340,11 +410,28 @@ mod quick_backend {
   use quick_xml::events::{BytesStart, Event};
   use quick_xml::name::{PrefixDeclaration, QName, ResolveResult};
   use quick_xml::reader::NsReader;
+  use std::collections::VecDeque;
   use std::io::BufRead;
+
+  enum InternalEvent {
+    StartElement {
+      name: XmlName,
+      attributes: Vec<XmlAttribute>,
+    },
+    EndElement {
+      name: XmlName,
+    },
+    Characters(String),
+    EndDocument,
+  }
 
   pub struct QuickXmlReader<R: BufRead> {
     inner: NsReader<R>,
-    pending: Option<XmlReadEvent>,
+    buf: Vec<u8>,
+    cached: Option<InternalEvent>,
+    materialized: Option<XmlReadEvent>,
+    pending_ends: VecDeque<XmlName>,
+    eof: bool,
     seen_any: bool,
   }
 
@@ -352,18 +439,22 @@ mod quick_backend {
     pub fn from_reader(reader: R) -> Self {
       let mut inner = NsReader::from_reader(reader);
       inner.config_mut().trim_text(false);
-      inner.config_mut().expand_empty_elements = true;
+      inner.config_mut().expand_empty_elements = false;
       inner.config_mut().check_end_names = true;
       Self {
         inner,
-        pending: None,
+        buf: Vec::new(),
+        cached: None,
+        materialized: None,
+        pending_ends: VecDeque::new(),
+        eof: false,
         seen_any: false,
       }
     }
 
     fn namespace_map(&self) -> XmlNamespace {
       let mut namespace = XmlNamespace::empty();
-      for (prefix, uri) in self.inner.prefixes() {
+      for (prefix, uri) in self.inner.resolver().bindings() {
         let prefix = match prefix {
           PrefixDeclaration::Default => String::new(),
           PrefixDeclaration::Named(prefix) => String::from_utf8_lossy(prefix).into_owned(),
@@ -373,14 +464,12 @@ mod quick_backend {
       namespace
     }
 
-    fn name_from_qname(&self, name: QName<'_>, attribute: bool) -> Result<XmlName, String> {
-      let (ns, local) = if attribute {
-        self.inner.resolve_attribute(name)
-      } else {
-        self.inner.resolve_element(name)
-      };
-      let (_, prefix) = name.decompose();
-      let namespace = match ns {
+    fn name_from_qname_with_resolve(
+      name: QName<'_>,
+      resolve: ResolveResult<'_>,
+    ) -> Result<XmlName, String> {
+      let (local, prefix) = name.decompose();
+      let namespace = match resolve {
         ResolveResult::Bound(ns) => Some(String::from_utf8_lossy(ns.0).into_owned()),
         ResolveResult::Unbound => None,
         ResolveResult::Unknown(prefix) => {
@@ -397,15 +486,19 @@ mod quick_backend {
       })
     }
 
-    fn attributes_from_start(&self, start: &BytesStart<'_>) -> Result<Vec<XmlAttribute>, String> {
+    fn attributes_from_start(
+      reader: &NsReader<R>,
+      start: &BytesStart<'_>,
+    ) -> Result<Vec<XmlAttribute>, String> {
       let mut attributes = Vec::new();
       for attr in start.attributes() {
         let attr = attr.map_err(|e| e.to_string())?;
         if attr.key.as_namespace_binding().is_some() {
           continue;
         }
+        let (resolve, _) = reader.resolver().resolve_attribute(attr.key);
         attributes.push(XmlAttribute {
-          name: self.name_from_qname(attr.key, true)?,
+          name: Self::name_from_qname_with_resolve(attr.key, resolve)?,
           value: attr
             .unescape_value()
             .map_err(|e| e.to_string())?
@@ -413,42 +506,6 @@ mod quick_backend {
         });
       }
       Ok(attributes)
-    }
-
-    fn event_to_owned(&mut self, event: Event<'_>) -> Result<Option<XmlReadEvent>, String> {
-      let converted = match event {
-        Event::Start(start) => Ok(Some(XmlReadEvent::StartElement {
-          name: self.name_from_qname(start.name(), false)?,
-          attributes: self.attributes_from_start(&start)?,
-          namespace: self.namespace_map(),
-        })),
-        Event::End(end) => Ok(Some(XmlReadEvent::EndElement {
-          name: self.name_from_qname(end.name(), false)?,
-        })),
-        Event::Text(text) => Ok(Some(XmlReadEvent::Characters(
-          quick_xml::escape::unescape(&text.decode().map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?
-            .into_owned(),
-        ))),
-        Event::CData(cdata) => Ok(Some(XmlReadEvent::Characters(
-          cdata.decode().map_err(|e| e.to_string())?.into_owned(),
-        ))),
-        Event::Eof => {
-          if self.seen_any {
-            Ok(Some(XmlReadEvent::EndDocument))
-          } else {
-            Err("Unexpected end of stream: no root element found".to_string())
-          }
-        }
-        Event::Decl(_) | Event::PI(_) | Event::DocType(_) | Event::Comment(_) | Event::GeneralRef(_) => Ok(None),
-        Event::Empty(_) => unreachable!("expand_empty_elements=true should avoid Empty events"),
-      }?;
-
-      if converted.is_some() && !matches!(converted, Some(XmlReadEvent::EndDocument)) {
-        self.seen_any = true;
-      }
-
-      Ok(converted)
     }
 
     fn map_quick_error(error: quick_xml::Error) -> String {
@@ -466,43 +523,223 @@ mod quick_backend {
       }
       msg
     }
+
+    fn read_internal(&mut self) -> Result<InternalEvent, String> {
+      loop {
+        if let Some(name) = self.pending_ends.pop_front() {
+          return Ok(InternalEvent::EndElement { name });
+        }
+
+        if self.eof {
+          if self.seen_any {
+            return Ok(InternalEvent::EndDocument);
+          }
+          return Err("Unexpected end of stream: no root element found".to_string());
+        }
+
+        self.buf.clear();
+        let reader = &mut self.inner;
+        let event = reader
+          .read_event_into(&mut self.buf)
+          .map_err(Self::map_quick_error)?;
+        match event {
+          Event::Start(start) => {
+            self.seen_any = true;
+            let (resolve, _) = reader.resolver().resolve_element(start.name());
+            let name = Self::name_from_qname_with_resolve(start.name(), resolve)?;
+            let attributes = Self::attributes_from_start(reader, &start)?;
+            return Ok(InternalEvent::StartElement { name, attributes });
+          }
+          Event::Empty(start) => {
+            self.seen_any = true;
+            let (resolve, _) = reader.resolver().resolve_element(start.name());
+            let name = Self::name_from_qname_with_resolve(start.name(), resolve)?;
+            let attributes = Self::attributes_from_start(reader, &start)?;
+            self.pending_ends.push_back(name.clone());
+            return Ok(InternalEvent::StartElement { name, attributes });
+          }
+          Event::End(end) => {
+            let (resolve, _) = reader.resolver().resolve_element(end.name());
+            let name = Self::name_from_qname_with_resolve(end.name(), resolve)?;
+            return Ok(InternalEvent::EndElement { name });
+          }
+          Event::Text(text) => {
+            let decoded = text.decode().map_err(|e| e.to_string())?;
+            let unescaped =
+              quick_xml::escape::unescape(decoded.as_ref()).map_err(|e| e.to_string())?;
+            let trimmed = unescaped.trim();
+            if trimmed.is_empty() {
+              continue;
+            }
+            return Ok(InternalEvent::Characters(trimmed.to_string()));
+          }
+          Event::CData(cdata) => {
+            return Ok(InternalEvent::Characters(
+              cdata.decode().map_err(|e| e.to_string())?.into_owned(),
+            ));
+          }
+          Event::Eof => {
+            self.eof = true;
+            if self.seen_any {
+              return Ok(InternalEvent::EndDocument);
+            }
+            return Err("Unexpected end of stream: no root element found".to_string());
+          }
+          Event::Decl(_)
+          | Event::PI(_)
+          | Event::DocType(_)
+          | Event::Comment(_)
+          | Event::GeneralRef(_) => {}
+        }
+      }
+    }
+
+    fn ensure_cached(&mut self) -> Result<(), String> {
+      if self.cached.is_none() && self.materialized.is_none() {
+        let event = self.read_internal()?;
+        self.cached = Some(event);
+      }
+      Ok(())
+    }
+
+    fn materialize_cached(&mut self) -> Result<(), String> {
+      if self.materialized.is_some() {
+        return Ok(());
+      }
+      self.ensure_cached()?;
+      if let Some(cached) = self.cached.take() {
+        self.materialized = Some(match cached {
+          InternalEvent::StartElement { name, attributes } => XmlReadEvent::StartElement {
+            name,
+            attributes,
+            namespace: self.namespace_map(),
+          },
+          InternalEvent::EndElement { name } => XmlReadEvent::EndElement { name },
+          InternalEvent::Characters(text) => XmlReadEvent::Characters(text),
+          InternalEvent::EndDocument => XmlReadEvent::EndDocument,
+        });
+      }
+      Ok(())
+    }
+
+    fn light_from_internal(event: &InternalEvent) -> XmlLightEvent {
+      match event {
+        InternalEvent::StartElement { name, .. } => XmlLightEvent::StartElement {
+          local_name: name.local_name.clone(),
+          namespace: name.namespace.clone(),
+        },
+        InternalEvent::EndElement { name } => XmlLightEvent::EndElement {
+          local_name: name.local_name.clone(),
+        },
+        InternalEvent::Characters(text) => XmlLightEvent::Characters(text.clone()),
+        InternalEvent::EndDocument => XmlLightEvent::EndDocument,
+      }
+    }
   }
 
   impl<R: BufRead> XmlEventReader for QuickXmlReader<R> {
     fn next_event(&mut self) -> Result<XmlReadEvent, String> {
-      if let Some(event) = self.pending.take() {
+      if let Some(event) = self.materialized.take() {
         return Ok(event);
       }
+      self.materialize_cached()?;
+      self
+        .materialized
+        .take()
+        .ok_or_else(|| "no event available".to_string())
+    }
 
-      let mut buf = Vec::new();
+    fn supports_light_events(&self) -> bool {
+      true
+    }
+
+    fn peek_light_event(&mut self) -> Result<XmlLightEvent, String> {
+      self.ensure_cached()?;
+      if let Some(event) = &self.materialized {
+        return Ok(XmlLightEvent::from(event));
+      }
+      self
+        .cached
+        .as_ref()
+        .map(Self::light_from_internal)
+        .ok_or_else(|| "unable to peek next item".to_string())
+    }
+
+    fn next_light_event(&mut self) -> Result<XmlLightEvent, String> {
+      if let Some(event) = self.materialized.take() {
+        return Ok(XmlLightEvent::from(&event));
+      }
+      self.ensure_cached()?;
+      self
+        .cached
+        .take()
+        .as_ref()
+        .map(Self::light_from_internal)
+        .ok_or_else(|| "no event available".to_string())
+    }
+
+    fn peek_attributes(&mut self) -> Result<Option<Vec<XmlAttribute>>, String> {
+      self.ensure_cached()?;
+      if let Some(XmlReadEvent::StartElement { attributes, .. }) = &self.materialized {
+        return Ok(Some(attributes.clone()));
+      }
+      match &self.cached {
+        Some(InternalEvent::StartElement { attributes, .. }) => Ok(Some(attributes.clone())),
+        _ => Ok(None),
+      }
+    }
+
+    fn read_inner_text(&mut self) -> Result<Option<String>, String> {
+      self.ensure_cached()?;
+
+      let start_name = if let Some(event) = self.materialized.take() {
+        match event {
+          XmlReadEvent::StartElement { name, .. } => name,
+          other => {
+            self.materialized = Some(other);
+            return Err("Internal error: expected StartElement".to_string());
+          }
+        }
+      } else {
+        match self.cached.take() {
+          Some(InternalEvent::StartElement { name, .. }) => name,
+          Some(other) => {
+            self.cached = Some(other);
+            return Err("Internal error: expected StartElement".to_string());
+          }
+          None => return Err("no event available".to_string()),
+        }
+      };
+
+      let mut text = String::new();
       loop {
-        buf.clear();
-        let event = self
-          .inner
-          .read_event_into(&mut buf)
-          .map_err(Self::map_quick_error)?;
-        if let Some(event) = self.event_to_owned(event)? {
-          match event {
-            XmlReadEvent::Characters(mut text) => loop {
-              buf.clear();
-              let next = self
-                .inner
-                .read_event_into(&mut buf)
-                .map_err(Self::map_quick_error)?;
-              match self.event_to_owned(next)? {
-                Some(XmlReadEvent::Characters(more)) => text.push_str(&more),
-                Some(other) => {
-                  let text = text.trim().to_string();
-                  if text.is_empty() {
-                    return Ok(other);
-                  }
-                  self.pending = Some(other);
-                  return Ok(XmlReadEvent::Characters(text));
-                }
-                None => {}
-              }
-            },
-            other => return Ok(other),
+        match self.read_internal()? {
+          InternalEvent::Characters(chunk) => text.push_str(&chunk),
+          InternalEvent::EndElement { name } if name == start_name => {
+            if text.is_empty() {
+              self.cached = Some(InternalEvent::EndElement { name });
+              return Ok(None);
+            }
+            return Ok(Some(text));
+          }
+          InternalEvent::EndElement { name } => {
+            return Err(format!(
+              "End tag </{}> didn't match the start tag <{}>",
+              name.local_name, start_name.local_name
+            ));
+          }
+          other @ InternalEvent::StartElement { .. } => {
+            self.cached = Some(other);
+            return Err(format!(
+              "Expected text content in <{}>",
+              start_name.local_name
+            ));
+          }
+          InternalEvent::EndDocument => {
+            return Err(format!(
+              "Unexpected end of document in <{}>",
+              start_name.local_name
+            ));
           }
         }
       }
