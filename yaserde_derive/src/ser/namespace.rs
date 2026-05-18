@@ -9,11 +9,11 @@ pub fn generate_namespaces_definition(attributes: &YaSerdeAttribute) -> TokenStr
     .map(|(prefix, namespace)| {
       if attributes.default_namespace.as_deref().eq(&Some(prefix)) {
         quote!(
-          .default_ns(#namespace)
+          namespace.force_put("", #namespace);
         )
       } else {
         quote!(
-          .ns(#prefix, #namespace)
+          namespace.force_put(#prefix, #namespace);
         )
       }
     })

@@ -12,15 +12,16 @@ pub fn enclose_characters(label: &Option<Ident>, label_name: String) -> TokenStr
 
 fn enclose_xml_event(label_name: String, yaserde_format: TokenStream) -> TokenStream {
   quote! {
-    let start_event = ::yaserde::__xml::writer::XmlEvent::start_element(#label_name);
-    writer.write(start_event).map_err(|e| e.to_string())?;
+    writer.write_start_element(
+      #label_name,
+      ::std::vec![],
+      ::yaserde::xml::XmlNamespace::empty(),
+    )?;
 
     let yaserde_value = #yaserde_format;
-    let data_event = ::yaserde::__xml::writer::XmlEvent::characters(&yaserde_value);
-    writer.write(data_event).map_err(|e| e.to_string())?;
+    writer.write_characters(&yaserde_value)?;
 
-    let end_event = ::yaserde::__xml::writer::XmlEvent::end_element();
-    writer.write(end_event).map_err(|e| e.to_string())?;
+    writer.write_end_element()?;
   }
 }
 
