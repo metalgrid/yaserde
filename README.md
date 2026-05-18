@@ -71,6 +71,8 @@ Enable the faster quick-xml backend with:
 yaserde = { version = "...", features = ["quick-xml-backend"] }
 ```
 
-When `quick-xml-backend` is enabled, `yaserde::de::from_str` and `from_reader` use quick-xml by default. For runtime selection, pass a `Box<dyn yaserde::xml::XmlEventReader>` to `yaserde::de::from_reader_dyn`.
+When `quick-xml-backend` is enabled, `yaserde::de::from_str` and `from_reader` use quick-xml by default. Generated deserializers automatically use parser-neutral light-event and simple-text fast paths when available, avoiding full XML event materialization for common leaf fields while keeping the backend swappable.
+
+For runtime selection, pass a `Box<dyn yaserde::xml::XmlEventReader>` to `yaserde::de::from_reader_dyn`.
 
 Migration note: custom deserializers should use `yaserde::xml::XmlReadEvent` instead of matching `xml::reader::XmlEvent` directly.
