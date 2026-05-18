@@ -285,7 +285,7 @@ pub fn parse(
 
       let visit = |action: &TokenStream, visitor: &Ident, visitor_label: &Ident| {
         Some(quote! {
-          for attr in attributes {
+          for attr in attributes.iter() {
             if attr.name.local_name == #label_name {
               let visitor = #visitor_label{};
               let value = visitor.#visitor(&attr.value)?;
@@ -297,7 +297,7 @@ pub fn parse(
 
       let visit_vec = |action: &TokenStream, visitor: &Ident, visitor_label: &Ident| {
         Some(quote! {
-          for attr in attributes {
+          for attr in attributes.iter() {
             if attr.name.local_name == #label_name {
               for value in attr.value.split_whitespace() {
                 let visitor = #visitor_label{};
@@ -311,7 +311,7 @@ pub fn parse(
 
       let visit_option_vec = |visitor: &Ident, visitor_label: &Ident| {
         Some(quote! {
-          for attr in attributes {
+          for attr in attributes.iter() {
             if attr.name.local_name == #label_name {
               if #label.is_none() {
                 #label = Some(Vec::new());
@@ -328,7 +328,7 @@ pub fn parse(
 
       let visit_string = || {
         Some(quote! {
-          for attr in attributes {
+          for attr in attributes.iter() {
             if attr.name.local_name == #label_name {
               #label = Some(attr.value.to_owned());
             }
@@ -464,30 +464,68 @@ pub fn parse(
   let flatten = root_attributes.flatten;
   let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-  quote! {
-    impl #impl_generics ::yaserde::YaDeserialize for #name #ty_generics #where_clause {
-      #[allow(unused_variables)]
-      fn deserialize<P: ::yaserde::xml::XmlEventReader>(
-        reader: &mut ::yaserde::de::Deserializer<P>,
-      ) -> ::std::result::Result<Self, ::std::string::String> {
-        let (named_element, struct_namespace) =
-          if let ::yaserde::xml::XmlReadEvent::StartElement { name, .. } = reader.peek()?.to_owned() {
-            (name.local_name.to_owned(), name.namespace.clone())
-          } else {
-            (::std::string::String::from(#root), ::std::option::Option::None)
-          };
-        let start_depth = reader.depth();
-        ::yaserde::__derive_debug!("Struct {} @ {}: start to parse {:?}", stringify!(#name), start_depth,
-               named_element);
+  let event_loop = if call_flatten_visitors.is_empty() {
+    quote! {
+        let mut depth = 0;
 
-        if reader.depth() == 0 {
-          #namespaces_matching
+        loop {
+          let event = reader.peek_light()?;
+          ::yaserde::__derive_trace!(
+            "Struct {} @ {}: matching {:?}",
+            stringify!(#name), start_depth, event,
+          );
+          match event {
+            ::yaserde::xml::XmlLightEvent::StartElement{ref local_name, ref namespace} => {
+              let namespace_opt = namespace.clone();
+              let namespace = namespace.clone().unwrap_or_default();
+              let attributes = if depth == 0 {
+                reader.peek_attributes()?.unwrap_or_default()
+              } else {
+                ::std::vec::Vec::new()
+              };
+              if depth == 0 && local_name == #root && namespace.as_str() == #root_namespace {
+                let _event = reader.next_light_event()?;
+              } else {
+                match (namespace.as_str(), local_name.as_str()) {
+                  #call_visitors
+                  _ => {
+                    let _event = reader.next_light_event()?;
+                    if depth > 0 {
+                      reader.skip_element(|_event| {})?;
+                    }
+                  }
+                }
+              }
+              if depth == 0 {
+                #attributes_loading
+              }
+              depth += 1;
+            }
+            ::yaserde::xml::XmlLightEvent::EndElement { ref local_name } => {
+              if local_name == &named_element && reader.depth() == start_depth + 1 {
+                break;
+              }
+              let _event = reader.next_light_event()?;
+              depth -= 1;
+            }
+            ::yaserde::xml::XmlLightEvent::EndDocument => {
+              let _event = reader.next_light_event()?;
+              if #flatten {
+                break;
+              }
+              return ::std::result::Result::Err(
+                ::std::format!("End of document, missing some content ?"),
+              );
+            }
+            ::yaserde::xml::XmlLightEvent::Characters(ref text_content) => {
+              #set_text
+              let _event = reader.next_light_event()?;
+            }
+          }
         }
-
-        #variables
-        #field_visitors
-        #init_unused
-
+    }
+  } else {
+    quote! {
         let mut depth = 0;
 
         loop {
@@ -498,15 +536,17 @@ pub fn parse(
           );
           match event {
             ::yaserde::xml::XmlReadEvent::StartElement{ref name, ref attributes, ..} => {
+              let local_name = &name.local_name;
+              let namespace_opt = name.namespace.clone();
               let namespace = name.namespace.clone().unwrap_or_default();
-              if depth == 0 && name.local_name == #root && namespace.as_str() == #root_namespace {
+              if depth == 0 && local_name == #root && namespace.as_str() == #root_namespace {
                 // Consume root element. We must do this first. In the case it shares a name with a child element, we don't
                 // want to prematurely match the child element below.
                 let event = reader.next_event()?;
                 #write_unused
               } else {
 
-                match (namespace.as_str(), name.local_name.as_str()) {
+                match (namespace.as_str(), local_name.as_str()) {
                   #call_visitors
                   _ => {
                     let event = reader.next_event()?;
@@ -554,6 +594,34 @@ pub fn parse(
             }
           }
         }
+    }
+  };
+
+  quote! {
+    impl #impl_generics ::yaserde::YaDeserialize for #name #ty_generics #where_clause {
+      #[allow(unused_variables)]
+      fn deserialize<P: ::yaserde::xml::XmlEventReader>(
+        reader: &mut ::yaserde::de::Deserializer<P>,
+      ) -> ::std::result::Result<Self, ::std::string::String> {
+        let (named_element, struct_namespace) =
+          if let ::yaserde::xml::XmlReadEvent::StartElement { name, .. } = reader.peek()?.to_owned() {
+            (name.local_name.to_owned(), name.namespace.clone())
+          } else {
+            (::std::string::String::from(#root), ::std::option::Option::None)
+          };
+        let start_depth = reader.depth();
+        ::yaserde::__derive_debug!("Struct {} @ {}: start to parse {:?}", stringify!(#name), start_depth,
+               named_element);
+
+        if reader.depth() == 0 {
+          #namespaces_matching
+        }
+
+        #variables
+        #field_visitors
+        #init_unused
+
+        #event_loop
 
         #visit_unused
 
@@ -565,7 +633,7 @@ pub fn parse(
 }
 
 fn build_call_visitor(
-  field_type: &TokenStream,
+  _field_type: &TokenStream,
   visitor: &Ident,
   action: &TokenStream,
   field: &YaSerdeField,
@@ -577,8 +645,8 @@ fn build_call_visitor(
 
   let namespaces_matching = field.get_namespace_matching(
     root_attributes,
-    quote!(name.namespace.as_ref()),
-    quote!(name.local_name.as_str()),
+    quote!(namespace_opt.as_ref()),
+    quote!(local_name.as_str()),
   );
 
   let namespace = field.prefix_namespace(root_attributes);
@@ -589,11 +657,9 @@ fn build_call_visitor(
 
       #namespaces_matching
 
-      let result = reader.read_inner_value::<#field_type, _>(|reader| {
-        if let ::std::result::Result::Ok(::yaserde::xml::XmlReadEvent::Characters(s)) = reader.peek() {
-          let val = visitor.#visitor(&s);
-          let _event = reader.next_event()?;
-          val
+      let result = reader.read_inner_text_light().and_then(|text| {
+        if let ::std::option::Option::Some(s) = text {
+          visitor.#visitor(&s)
         } else {
           ::std::result::Result::Err(::std::format!("unable to parse content for {}", #label_name))
         }

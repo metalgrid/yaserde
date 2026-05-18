@@ -36,36 +36,18 @@ pub fn parse(
     }
   } else {
     quote! {
-      name.local_name.as_str()
+      local_name.as_str()
     }
   };
 
-  quote! {
-    impl #impl_generics ::yaserde::YaDeserialize for #name #ty_generics #where_clause {
-      #[allow(unused_variables)]
-      fn deserialize<P: ::yaserde::xml::XmlEventReader>(
-        reader: &mut ::yaserde::de::Deserializer<P>,
-      ) -> ::std::result::Result<Self, ::std::string::String> {
-        let (named_element, enum_namespace) =
-          if let ::yaserde::xml::XmlReadEvent::StartElement{ name, .. } = reader.peek()?.to_owned() {
-            (name.local_name.to_owned(), name.namespace.clone())
-          } else {
-            (::std::string::String::from(#root), ::std::option::Option::None)
-          };
-
-        let start_depth = reader.depth();
-        ::yaserde::__derive_debug!("Enum {} @ {}: start to parse {:?}", stringify!(#name), start_depth, named_element);
-
-        #namespaces_matching
-
-        #[allow(unused_assignments, unused_mut)]
-        let mut enum_value = ::std::option::Option::None;
-
+  let event_loop = if flatten {
+    quote! {
         loop {
           let event = reader.peek()?.to_owned();
           ::yaserde::__derive_trace!("Enum {} @ {}: matching {:?}", stringify!(#name), start_depth, event);
           match event {
             ::yaserde::xml::XmlReadEvent::StartElement { ref name, ref attributes, .. } => {
+              let local_name = &name.local_name;
               match #element_name {
                 #match_to_enum
                 _named_element => {
@@ -99,11 +81,77 @@ pub fn parse(
                 ::std::format!("End of document, missing some content ?"),
               );
             }
-            event => {
-              return ::std::result::Result::Err(::std::format!("unknown event {:?}", event))
+          }
+        }
+    }
+  } else {
+    quote! {
+        loop {
+          let event = reader.peek_light()?;
+          ::yaserde::__derive_trace!("Enum {} @ {}: matching {:?}", stringify!(#name), start_depth, event);
+          match event {
+            ::yaserde::xml::XmlLightEvent::StartElement { ref local_name, .. } => {
+              let attributes = reader.peek_attributes()?.unwrap_or_default();
+              match #element_name {
+                #match_to_enum
+                _named_element => {
+                  let _root = reader.next_light_event();
+                }
+              }
+
+              if let ::yaserde::xml::XmlLightEvent::Characters(content) = reader.peek_light()? {
+                match content.as_str() {
+                  #match_to_enum
+                  _ => {}
+                }
+              }
+            }
+            ::yaserde::xml::XmlLightEvent::EndElement { ref local_name } => {
+              if local_name == &named_element && reader.depth() == start_depth + 1 {
+                break;
+              }
+              let _root = reader.next_light_event();
+            }
+            ::yaserde::xml::XmlLightEvent::Characters(ref text_content) => {
+              let _root = reader.next_light_event();
+            }
+            ::yaserde::xml::XmlLightEvent::EndDocument => {
+              let _root = reader.next_light_event();
+              if #flatten {
+                break;
+              }
+
+              return ::std::result::Result::Err(
+                ::std::format!("End of document, missing some content ?"),
+              );
             }
           }
         }
+    }
+  };
+
+  quote! {
+    impl #impl_generics ::yaserde::YaDeserialize for #name #ty_generics #where_clause {
+      #[allow(unused_variables)]
+      fn deserialize<P: ::yaserde::xml::XmlEventReader>(
+        reader: &mut ::yaserde::de::Deserializer<P>,
+      ) -> ::std::result::Result<Self, ::std::string::String> {
+        let (named_element, enum_namespace) =
+          if let ::yaserde::xml::XmlReadEvent::StartElement{ name, .. } = reader.peek()?.to_owned() {
+            (name.local_name.to_owned(), name.namespace.clone())
+          } else {
+            (::std::string::String::from(#root), ::std::option::Option::None)
+          };
+
+        let start_depth = reader.depth();
+        ::yaserde::__derive_debug!("Enum {} @ {}: start to parse {:?}", stringify!(#name), start_depth, named_element);
+
+        #namespaces_matching
+
+        #[allow(unused_assignments, unused_mut)]
+        let mut enum_value = ::std::option::Option::None;
+
+        #event_loop
 
         ::yaserde::__derive_debug!("Enum {} @ {}: success", stringify!(#name), start_depth);
         ::std::result::Result::Ok(enum_value.unwrap_or(<#name as ::std::default::Default>::default()))
@@ -235,26 +283,15 @@ fn build_unnamed_visitor_calls(
 
       let call_simple_type_visitor = |simple_type: Field, action| {
         let visitor = simple_type.get_simple_type_visitor();
-        let field_type: TokenStream = simple_type.into();
-
-        let label_name = format!("field_{}", idx);
+        let _field_type: TokenStream = simple_type.into();
 
         Some(quote! {
           let visitor = #visitor_label{};
 
-          let result = reader.read_inner_value::<#field_type, _>(|reader| {
-            if let ::yaserde::xml::XmlReadEvent::EndElement { .. } = *reader.peek()? {
-              return visitor.#visitor("");
-            }
-
-            if let ::std::result::Result::Ok(::yaserde::xml::XmlReadEvent::Characters(s))
-              = reader.next_event()
-            {
-              visitor.#visitor(&s)
-            } else {
-              ::std::result::Result::Err(
-                ::std::format!("unable to parse content for {}", #label_name),
-              )
+          let result = reader.read_inner_text_light().and_then(|text| {
+            match text {
+              ::std::option::Option::Some(s) => visitor.#visitor(&s),
+              ::std::option::Option::None => visitor.#visitor(""),
             }
           });
 
