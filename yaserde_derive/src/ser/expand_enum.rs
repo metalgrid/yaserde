@@ -33,8 +33,8 @@ pub fn serialize(
         quote! {
           match self {
             #name::#label { .. } => {
-              let tag = ::yaserde::__xml::name::OwnedName::local(#tag);
-              child_attributes.push(::yaserde::__xml::attribute::OwnedAttribute::new(tag, #element_name));
+              let tag = ::yaserde::xml::XmlName::local(#tag);
+              child_attributes.push(::yaserde::xml::XmlAttribute::new(tag, #element_name));
             }
             _ => {}
           }
@@ -76,12 +76,12 @@ pub fn serialize(
                   quote! {
                     match self {
                       #name::#label #destructure => {
-                        let (attributes, namespace) = #var.serialize_attributes(
-                          child_attributes,
-                          child_attributes_namespace,
+                        let (serialized_attributes, serialized_namespace) = #var.serialize_attributes(
+                          ::std::vec::Vec::<::yaserde::xml::XmlAttribute>::new(),
+                          ::yaserde::xml::XmlNamespace::empty(),
                         )?;
-                        child_attributes_namespace.extend(&namespace);
-                        child_attributes.extend(attributes);
+                        child_attributes_namespace.extend(&serialized_namespace);
+                        child_attributes.extend(serialized_attributes);
                       },
                       _ => {}
                     }
@@ -133,12 +133,11 @@ fn inner_enum_inspector(
           } else {
             quote! {
               #name::#label => {
-                let data_event = ::yaserde::__xml::writer::XmlEvent::characters(#label_name);
-                writer.write(data_event).map_err(|e| e.to_string())?;
+                writer.write_characters(#label_name)?;
               }
             }
           }
-        },
+        }
         Fields::Named(ref fields) => {
           let enum_fields: TokenStream = fields
             .named
@@ -150,8 +149,7 @@ fn inner_enum_inspector(
 
               if field.is_text_content() {
                 return Some(quote!(
-                  let data_event = ::yaserde::__xml::writer::XmlEvent::characters(&self.#field_label);
-                  writer.write(data_event).map_err(|e| e.to_string())?;
+                  writer.write_characters(&self.#field_label)?;
                 ));
               }
 
@@ -173,16 +171,16 @@ fn inner_enum_inspector(
                   quote! {
                     match self {
                       &#name::#label { ref #field_label, .. } => {
-                        let struct_start_event =
-                          ::yaserde::__xml::writer::XmlEvent::start_element(#field_label_name);
-                        writer.write(struct_start_event).map_err(|e| e.to_string())?;
+                        writer.write_start_element(
+                          #field_label_name,
+                          ::std::vec![],
+                          ::yaserde::xml::XmlNamespace::empty(),
+                        )?;
 
                         let string_value = #field_label.to_string();
-                        let data_event = ::yaserde::__xml::writer::XmlEvent::characters(&string_value);
-                        writer.write(data_event).map_err(|e| e.to_string())?;
+                        writer.write_characters(&string_value)?;
 
-                        let struct_end_event = ::yaserde::__xml::writer::XmlEvent::end_element();
-                        writer.write(struct_end_event).map_err(|e| e.to_string())?;
+                        writer.write_end_element()?;
                       },
                       _ => {},
                     }
@@ -234,25 +232,25 @@ fn inner_enum_inspector(
             .map(|field| {
               let write_element = |action: &TokenStream| {
                 quote! {
-                  let struct_start_event = ::yaserde::__xml::writer::XmlEvent::start_element(#label_name);
-                  writer.write(struct_start_event).map_err(|e| e.to_string())?;
+                  writer.write_start_element(
+                    #label_name,
+                    ::std::vec![],
+                    ::yaserde::xml::XmlNamespace::empty(),
+                  )?;
 
                   #action
 
-                  let struct_end_event = ::yaserde::__xml::writer::XmlEvent::end_element();
-                  writer.write(struct_end_event).map_err(|e| e.to_string())?;
+                  writer.write_end_element()?;
                 }
               };
 
               let write_string_chars = quote! {
-                let data_event = ::yaserde::__xml::writer::XmlEvent::characters(item);
-                writer.write(data_event).map_err(|e| e.to_string())?;
+                writer.write_characters(item)?;
               };
 
               let write_simple_type = write_element(&quote! {
                 let s = item.to_string();
-                let data_event = ::yaserde::__xml::writer::XmlEvent::characters(&s);
-                writer.write(data_event).map_err(|e| e.to_string())?;
+                writer.write_characters(&s)?;
               });
 
               let serialize = quote! {
@@ -300,10 +298,10 @@ fn inner_enum_inspector(
                 }
                 Field::FieldStruct { .. } => {
                   if variant_attrs.flatten || field.is_flatten() {
-                     match_field(&quote!{ ::yaserde::YaSerialize::serialize(item, writer)?})
-                   } else {
-                     write_element(&match_field(&serialize))
-                   }
+                    match_field(&quote! { ::yaserde::YaSerialize::serialize(item, writer)?})
+                  } else {
+                    write_element(&match_field(&serialize))
+                  }
                 }
                 Field::FieldString => match_field(&write_element(&write_string_chars)),
                 _simple_type => match_field(&write_simple_type),

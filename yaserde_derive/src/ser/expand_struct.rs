@@ -39,7 +39,7 @@ pub fn serialize(
           | Field::FieldF64 => field.ser_wrap_default_attribute(
             Some(quote!(self.#label.to_string())),
             quote!({
-              struct_start_event.attr(#label_name, &yaserde_inner)
+              attributes.push(::yaserde::xml::XmlAttribute::new(::yaserde::xml::XmlName::local(#label_name), yaserde_inner.clone()));
             }),
           ),
           Field::FieldOption { data_type } => match *data_type {
@@ -47,9 +47,7 @@ pub fn serialize(
               None,
               quote!({
                 if let ::std::option::Option::Some(ref value) = self.#label {
-                  struct_start_event.attr(#label_name, value)
-                } else {
-                  struct_start_event
+                  attributes.push(::yaserde::xml::XmlAttribute::new(::yaserde::xml::XmlName::local(#label_name), value.clone()));
                 }
               }),
             ),
@@ -69,9 +67,7 @@ pub fn serialize(
               ),
               quote!({
                 if let ::std::option::Option::Some(ref value) = self.#label {
-                  struct_start_event.attr(#label_name, &yaserde_inner)
-                } else {
-                  struct_start_event
+                  attributes.push(::yaserde::xml::XmlAttribute::new(::yaserde::xml::XmlName::local(#label_name), yaserde_inner.clone()));
                 }
               }),
             ),
@@ -111,9 +107,7 @@ pub fn serialize(
               }),
               quote!({
                 if let ::std::option::Option::Some(ref yaserde_struct) = self.#label {
-                  struct_start_event.attr(#label_name, &yaserde_inner)
-                } else {
-                  struct_start_event
+                  attributes.push(::yaserde::xml::XmlAttribute::new(::yaserde::xml::XmlName::local(#label_name), yaserde_inner.clone()));
                 }
               }),
             ),
@@ -122,7 +116,7 @@ pub fn serialize(
           Field::FieldStruct { .. } => field.ser_wrap_default_attribute(
             Some(quote! { ::yaserde::ser::to_string_content(&self.#label)? }),
             quote!({
-              struct_start_event.attr(#label_name, &yaserde_inner)
+              attributes.push(::yaserde::xml::XmlAttribute::new(::yaserde::xml::XmlName::local(#label_name), yaserde_inner.clone()));
             }),
           ),
           Field::FieldVec { data_type } => match *data_type {
@@ -146,7 +140,7 @@ pub fn serialize(
                   .join(" ")
               }),
               quote!({
-                struct_start_event.attr(#label_name, &yaserde_inner)
+                attributes.push(::yaserde::xml::XmlAttribute::new(::yaserde::xml::XmlName::local(#label_name), yaserde_inner.clone()));
               }),
             ),
             Field::FieldOption { .. } | Field::FieldVec { .. } => {
@@ -161,7 +155,7 @@ pub fn serialize(
                   .join(" ")
               }),
               quote!({
-                struct_start_event.attr(#label_name, &yaserde_inner)
+                attributes.push(::yaserde::xml::XmlAttribute::new(::yaserde::xml::XmlName::local(#label_name), yaserde_inner.clone()));
               }),
             ),
           },
@@ -170,12 +164,12 @@ pub fn serialize(
         match field.get_type() {
           Field::FieldStruct { .. } => {
             quote!(
-              let (attributes, namespace) = self.#label.serialize_attributes(
-                ::std::vec![],
-                ::yaserde::__xml::namespace::Namespace::empty(),
+              let (serialized_attributes, serialized_namespace) = self.#label.serialize_attributes(
+                ::std::vec::Vec::<::yaserde::xml::XmlAttribute>::new(),
+                ::yaserde::xml::XmlNamespace::empty(),
               )?;
-              child_attributes_namespace.extend(&namespace);
-              child_attributes.extend(attributes);
+              child_attributes_namespace.extend(&serialized_namespace);
+              child_attributes.extend(serialized_attributes);
             )
           }
           _ => quote!(),
@@ -195,12 +189,10 @@ pub fn serialize(
         return match field.get_type() {
           Field::FieldOption { .. } => Some(quote!(
             let s = self.#label.as_deref().unwrap_or_default();
-            let data_event = ::yaserde::__xml::writer::XmlEvent::characters(s);
-            writer.write(data_event).map_err(|e| e.to_string())?;
+            writer.write_characters(s)?;
           )),
           _ => Some(quote!(
-            let data_event = ::yaserde::__xml::writer::XmlEvent::characters(&self.#label);
-            writer.write(data_event).map_err(|e| e.to_string())?;
+            writer.write_characters(&self.#label)?;
           )),
         };
       }
@@ -210,12 +202,13 @@ pub fn serialize(
       if field.is_cdata() {
         return quote! {
             #conditions {
-              let start_event = ::yaserde::__xml::writer::XmlEvent::start_element(#label_name);
-              writer.write(start_event).map_err(|e| e.to_string())?;
-              let data = ::yaserde::__xml::writer::events::XmlEvent::cdata(&self.#label);
-              writer.write(data).map_err(|e| e.to_string())?;
-              let end_event = ::yaserde::__xml::writer::XmlEvent::end_element();
-              writer.write(end_event).map_err(|e| e.to_string())?;
+              writer.write_start_element(
+                #label_name,
+                ::std::vec![],
+                ::yaserde::xml::XmlNamespace::empty(),
+              )?;
+              writer.write_cdata(&self.#label)?;
+              writer.write_end_element()?;
             }
         }.into()
       }
@@ -451,11 +444,9 @@ fn ser_option_vec_attribute(
 
   let attribute_expr = quote!({
     if self.#label.is_some() && !yaserde_inner.is_empty() {
-      struct_start_event.attr(#label_name, &yaserde_inner)
+      attributes.push(::yaserde::xml::XmlAttribute::new(::yaserde::xml::XmlName::local(#label_name), yaserde_inner.clone()));
     } else if self.#label.is_some() {
-      struct_start_event.attr(#label_name, "")
-    } else {
-      struct_start_event
+      attributes.push(::yaserde::xml::XmlAttribute::new(::yaserde::xml::XmlName::local(#label_name), ""));
     }
   });
 
