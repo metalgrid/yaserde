@@ -27,12 +27,12 @@ pub fn primitive_yaserde(input: TokenStream) -> TokenStream {
 
           fn serialize_attributes(
               &self,
-              attributes: ::std::vec::Vec<::yaserde::__xml::attribute::OwnedAttribute>,
-              namespace: ::yaserde::__xml::namespace::Namespace,
+              attributes: ::std::vec::Vec<::yaserde::xml::XmlAttribute>,
+              namespace: ::yaserde::xml::XmlNamespace,
           ) -> ::std::result::Result<
               (
-                  ::std::vec::Vec<::yaserde::__xml::attribute::OwnedAttribute>,
-                  ::yaserde::__xml::namespace::Namespace,
+                  ::std::vec::Vec<::yaserde::xml::XmlAttribute>,
+                  ::yaserde::xml::XmlNamespace,
               ),
               ::std::string::String,
           > {
@@ -41,8 +41,8 @@ pub fn primitive_yaserde(input: TokenStream) -> TokenStream {
       }
 
       impl ::yaserde::YaDeserialize for #struct_name {
-          fn deserialize<R: ::std::io::Read>(
-              reader: &mut ::yaserde::de::Deserializer<R>,
+          fn deserialize<P: ::yaserde::xml::XmlEventReader>(
+              reader: &mut ::yaserde::de::Deserializer<P>,
           ) -> ::std::result::Result<Self, ::std::string::String> {
               ::yaserde::primitives::deserialize_primitives(
                   reader,

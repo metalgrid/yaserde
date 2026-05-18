@@ -43,11 +43,11 @@ pub fn parse(
   quote! {
     impl #impl_generics ::yaserde::YaDeserialize for #name #ty_generics #where_clause {
       #[allow(unused_variables)]
-      fn deserialize<R: ::std::io::Read>(
-        reader: &mut ::yaserde::de::Deserializer<R>,
+      fn deserialize<P: ::yaserde::xml::XmlEventReader>(
+        reader: &mut ::yaserde::de::Deserializer<P>,
       ) -> ::std::result::Result<Self, ::std::string::String> {
         let (named_element, enum_namespace) =
-          if let ::yaserde::__xml::reader::XmlEvent::StartElement{ name, .. } = reader.peek()?.to_owned() {
+          if let ::yaserde::xml::XmlReadEvent::StartElement{ name, .. } = reader.peek()?.to_owned() {
             (name.local_name.to_owned(), name.namespace.clone())
           } else {
             (::std::string::String::from(#root), ::std::option::Option::None)
@@ -65,7 +65,7 @@ pub fn parse(
           let event = reader.peek()?.to_owned();
           ::yaserde::__derive_trace!("Enum {} @ {}: matching {:?}", stringify!(#name), start_depth, event);
           match event {
-            ::yaserde::__xml::reader::XmlEvent::StartElement { ref name, ref attributes, .. } => {
+            ::yaserde::xml::XmlReadEvent::StartElement { ref name, ref attributes, .. } => {
               match #element_name {
                 #match_to_enum
                 _named_element => {
@@ -73,23 +73,24 @@ pub fn parse(
                 }
               }
 
-              if let ::yaserde::__xml::reader::XmlEvent::Characters(content) = reader.peek()?.to_owned() {
+              if let ::yaserde::xml::XmlReadEvent::Characters(content) = reader.peek()?.to_owned() {
                 match content.as_str() {
                   #match_to_enum
                   _ => {}
                 }
               }
             }
-            ::yaserde::__xml::reader::XmlEvent::EndElement { ref name } => {
+            ::yaserde::xml::XmlReadEvent::EndElement { ref name } => {
               if name.local_name == named_element && reader.depth() == start_depth + 1 {
                 break;
               }
               let _root = reader.next_event();
             }
-            ::yaserde::__xml::reader::XmlEvent::Characters(ref text_content) => {
+            ::yaserde::xml::XmlReadEvent::Characters(ref text_content) => {
               let _root = reader.next_event();
             }
-            ::yaserde::__xml::reader::XmlEvent::EndDocument => {
+            ::yaserde::xml::XmlReadEvent::EndDocument => {
+              let _root = reader.next_event();
               if #flatten {
                 break;
               }
@@ -242,11 +243,11 @@ fn build_unnamed_visitor_calls(
           let visitor = #visitor_label{};
 
           let result = reader.read_inner_value::<#field_type, _>(|reader| {
-            if let ::yaserde::__xml::reader::XmlEvent::EndElement { .. } = *reader.peek()? {
+            if let ::yaserde::xml::XmlReadEvent::EndElement { .. } = *reader.peek()? {
               return visitor.#visitor("");
             }
 
-            if let ::std::result::Result::Ok(::yaserde::__xml::reader::XmlEvent::Characters(s))
+            if let ::std::result::Result::Ok(::yaserde::xml::XmlReadEvent::Characters(s))
               = reader.next_event()
             {
               visitor.#visitor(&s)

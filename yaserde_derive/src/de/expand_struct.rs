@@ -176,7 +176,7 @@ pub fn parse(
               // Don't count current struct's StartElement as substruct's StartElement
               let _root = reader.next_event();
             }
-            if let Ok(::yaserde::__xml::reader::XmlEvent::StartElement { .. }) = reader.peek() {
+            if let Ok(::yaserde::xml::XmlReadEvent::StartElement { .. }) = reader.peek() {
               // If substruct's start element found then deserialize substruct
               let value = <#struct_name as ::yaserde::YaDeserialize>::deserialize(reader)?;
               #value_label #action;
@@ -467,11 +467,11 @@ pub fn parse(
   quote! {
     impl #impl_generics ::yaserde::YaDeserialize for #name #ty_generics #where_clause {
       #[allow(unused_variables)]
-      fn deserialize<R: ::std::io::Read>(
-        reader: &mut ::yaserde::de::Deserializer<R>,
+      fn deserialize<P: ::yaserde::xml::XmlEventReader>(
+        reader: &mut ::yaserde::de::Deserializer<P>,
       ) -> ::std::result::Result<Self, ::std::string::String> {
         let (named_element, struct_namespace) =
-          if let ::yaserde::__xml::reader::XmlEvent::StartElement { name, .. } = reader.peek()?.to_owned() {
+          if let ::yaserde::xml::XmlReadEvent::StartElement { name, .. } = reader.peek()?.to_owned() {
             (name.local_name.to_owned(), name.namespace.clone())
           } else {
             (::std::string::String::from(#root), ::std::option::Option::None)
@@ -497,7 +497,7 @@ pub fn parse(
             stringify!(#name), start_depth, event,
           );
           match event {
-            ::yaserde::__xml::reader::XmlEvent::StartElement{ref name, ref attributes, ..} => {
+            ::yaserde::xml::XmlReadEvent::StartElement{ref name, ref attributes, ..} => {
               let namespace = name.namespace.clone().unwrap_or_default();
               if depth == 0 && name.local_name == #root && namespace.as_str() == #root_namespace {
                 // Consume root element. We must do this first. In the case it shares a name with a child element, we don't
@@ -525,7 +525,7 @@ pub fn parse(
               }
               depth += 1;
             }
-            ::yaserde::__xml::reader::XmlEvent::EndElement { ref name } => {
+            ::yaserde::xml::XmlReadEvent::EndElement { ref name } => {
               if name.local_name == named_element && reader.depth() == start_depth + 1 {
                 #write_unused
                 break;
@@ -534,12 +534,17 @@ pub fn parse(
               #write_unused
               depth -= 1;
             }
-            ::yaserde::__xml::reader::XmlEvent::EndDocument => {
+            ::yaserde::xml::XmlReadEvent::EndDocument => {
+              let event = reader.next_event()?;
+              #write_unused
               if #flatten {
                 break;
               }
+              return ::std::result::Result::Err(
+                ::std::format!("End of document, missing some content ?"),
+              );
             }
-            ::yaserde::__xml::reader::XmlEvent::Characters(ref text_content) => {
+            ::yaserde::xml::XmlReadEvent::Characters(ref text_content) => {
               #set_text
               let event = reader.next_event()?;
               #write_unused
@@ -585,7 +590,7 @@ fn build_call_visitor(
       #namespaces_matching
 
       let result = reader.read_inner_value::<#field_type, _>(|reader| {
-        if let ::std::result::Result::Ok(::yaserde::__xml::reader::XmlEvent::Characters(s)) = reader.peek() {
+        if let ::std::result::Result::Ok(::yaserde::xml::XmlReadEvent::Characters(s)) = reader.peek() {
           let val = visitor.#visitor(&s);
           let _event = reader.next_event()?;
           val
@@ -615,7 +620,7 @@ fn build_code_for_unused_xml_events(
     }),
     Some(quote! {
       if let ::std::option::Option::Some(ref mut w) = writer {
-        if w.write(event.as_writer_event().unwrap()).is_err() {
+        if event.write_to_xml_rs(w).is_err() {
           writer = ::std::option::Option::None;
         }
       }

@@ -4,7 +4,6 @@ extern crate yaserde;
 extern crate yaserde_derive;
 
 use log::debug;
-use std::io::Read;
 use yaserde::de::from_str;
 use yaserde::YaDeserialize;
 
@@ -236,7 +235,7 @@ fn de_attributes_custom_deserializer() {
   mod other_mod {
     use super::*;
 
-    use xml::reader::XmlEvent;
+    use yaserde::xml::XmlReadEvent as XmlEvent;
 
     #[derive(Debug, PartialEq)]
     pub struct Attributes {
@@ -244,7 +243,9 @@ fn de_attributes_custom_deserializer() {
     }
 
     impl YaDeserialize for Attributes {
-      fn deserialize<R: Read>(reader: &mut yaserde::de::Deserializer<R>) -> Result<Self, String> {
+      fn deserialize<P: yaserde::xml::XmlEventReader>(
+        reader: &mut yaserde::de::Deserializer<P>,
+      ) -> Result<Self, String> {
         loop {
           match reader.next_event()? {
             XmlEvent::StartElement { .. } => {}
@@ -806,10 +807,12 @@ fn de_custom() {
   }
 
   impl YaDeserialize for Day {
-    fn deserialize<R: Read>(reader: &mut yaserde::de::Deserializer<R>) -> Result<Self, String> {
+    fn deserialize<P: yaserde::xml::XmlEventReader>(
+      reader: &mut yaserde::de::Deserializer<P>,
+    ) -> Result<Self, String> {
       use std::str::FromStr;
 
-      if let xml::reader::XmlEvent::StartElement { name, .. } = reader.peek()?.to_owned() {
+      if let yaserde::xml::XmlReadEvent::StartElement { name, .. } = reader.peek()?.to_owned() {
         let expected_name = "Day".to_owned();
         if name.local_name != expected_name {
           return Err(format!(
@@ -822,7 +825,7 @@ fn de_custom() {
         return Err("StartElement missing".to_string());
       }
 
-      if let xml::reader::XmlEvent::Characters(text) = reader.peek()?.to_owned() {
+      if let yaserde::xml::XmlReadEvent::Characters(text) = reader.peek()?.to_owned() {
         Ok(Day {
           value: 2 * i32::from_str(&text).unwrap(),
         })
