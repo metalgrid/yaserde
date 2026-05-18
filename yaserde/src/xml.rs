@@ -426,7 +426,9 @@ mod quick_backend {
           name: self.name_from_qname(end.name(), false)?,
         })),
         Event::Text(text) => Ok(Some(XmlReadEvent::Characters(
-          text.unescape().map_err(|e| e.to_string())?.into_owned(),
+          quick_xml::escape::unescape(&text.decode().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?
+            .into_owned(),
         ))),
         Event::CData(cdata) => Ok(Some(XmlReadEvent::Characters(
           cdata.decode().map_err(|e| e.to_string())?.into_owned(),
@@ -438,7 +440,7 @@ mod quick_backend {
             Err("Unexpected end of stream: no root element found".to_string())
           }
         }
-        Event::Decl(_) | Event::PI(_) | Event::DocType(_) | Event::Comment(_) => Ok(None),
+        Event::Decl(_) | Event::PI(_) | Event::DocType(_) | Event::Comment(_) | Event::GeneralRef(_) => Ok(None),
         Event::Empty(_) => unreachable!("expand_empty_elements=true should avoid Empty events"),
       }?;
 
