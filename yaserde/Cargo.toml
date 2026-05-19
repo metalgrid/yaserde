@@ -26,6 +26,17 @@ log = "0.4"
 [dev-dependencies]
 env_logger = "0.11.0"
 yaserde_derive = { version = "0.12.0", path = "../yaserde_derive" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "bench_deserialize"
+harness = false
+required-features = ["quick-xml-backend"]
+
+[[bench]]
+name = "bench_serialize"
+harness = false
+required-features = ["quick-xml-backend"]
 
 [badges]
 travis-ci = { repository = "media-io/yaserde" }
