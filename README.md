@@ -27,8 +27,8 @@ This library will support XML de/ser-ializing with all specific features.
 - [x] **namespace**: defines the namespace of the field
 - [x] **rename**: be able to rename a field
 - [x] **root**: rename the based element. Used only at the XML root.
-- [x] **skip_serializing**: Exclude this field from the serialized output. [More details...](doc/skip_serializing.md)
-- [x] **skip_serializing_if**: Skip the serialisation for this field if the condition is true.  [More details...](doc/skip_serializing.md)
+- [x] **skip_serializing**: Exclude this field from the serialized output. [More details...](docs/skip_serializing.md)
+- [x] **skip_serializing_if**: Skip the serialisation for this field if the condition is true.  [More details...](docs/skip_serializing.md)
 - [x] **text**: this field match to the text content
 
 ## Custom De/Ser-rializer
@@ -76,3 +76,5 @@ When `quick-xml-backend` is enabled, `yaserde::de::from_str` and `from_reader` u
 For runtime selection, pass a `Box<dyn yaserde::xml::XmlEventReader>` to `yaserde::de::from_reader_dyn`.
 
 Migration note: custom deserializers should use `yaserde::xml::XmlReadEvent` instead of matching `xml::reader::XmlEvent` directly.
+
+See [Implementing a Custom XML Backend](docs/custom-backend.md) for details on plugging in your own parser.
