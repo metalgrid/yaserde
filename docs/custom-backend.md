@@ -2,8 +2,8 @@
 
 YaSerDe's parser layer uses `XmlEventReader` for pluggable deserialization, plus shared
 XML value types. Implementing this trait lets you plug in a parser while keeping derived
-`#[derive(YaDeserialize)]` code unchanged. The standalone `XmlEventWriter` trait describes
-neutral write events, but is not a public injection point for `Serializer<W>`.
+`#[derive(YaDeserialize)]` code unchanged. `XmlEventWriter` similarly injects emitters or
+application policy wrappers into `Serializer<E>` and derived `YaSerialize` implementations.
 
 This document walks through every type and method you need to implement, with a complete
 worked example at the end.
@@ -27,8 +27,8 @@ worked example at the end.
 ## Shared Value Types
 
 All backends exchange data through the types defined in `yaserde::xml`.  Your backend must
-produce (reader) or consume (writer) these types — **never** expose parser-native types
-through the trait boundary.
+produce (reader) or consume (writer) these types. Writers also accept borrowed legacy
+xml-rs events through re-exported `LegacyXmlEvent` / `LegacyXmlError` aliases.
 
 | Type | Role |
 |------|------|
@@ -197,25 +197,46 @@ responsible for its own internal one-element look-ahead to satisfy these peek ca
 ```rust
 pub trait XmlEventWriter {
     fn write_event(&mut self, event: XmlWriteEvent<'_>) -> Result<(), String>;
+    fn write_legacy_event(&mut self, event: LegacyXmlEvent<'_>) -> Result<(), LegacyXmlError>;
 }
 ```
 
-A single method.  Receive a `XmlWriteEvent` and emit the corresponding XML.  The
-implementation must handle all four variants (`StartElement`, `EndElement`, `Characters`,
-`CData`).  Return `Err(String)` on I/O errors or well-formedness violations.
+Both methods are required. Neutral events cover starts, ends, text and CDATA; legacy
+events additionally preserve declarations, comments, processing instructions, borrowed
+names/attributes and explicit end-name metadata. Errors must propagate, including typed
+legacy errors. A wrapper must forward **both** representations through its inner emitter:
+raw `Serializer::write` never bypasses injection. Neither trait requires `io::Write`.
+The quick emitter consumes neutral events directly, with borrowed name/attribute/binding
+iterators, not owned xml-rs conversion allocations.
 
-`Serializer<W>` uses a private backend selected by Cargo features: native quick-xml when
-`quick-xml-backend` is enabled, otherwise xml-rs. This includes `to_string`,
-`to_string_with_config`, `serialize_with_writer`, and content-only helpers. There is no
-public arbitrary-writer injection API; implementing `XmlEventWriter` alone does not wire
-a custom emitter into derived serialization.
+`Serializer<E: XmlEventWriter>` owns E; `Serializer::new(E)` injects it and
+`into_inner()` returns E without I/O. `serialize_with_event_writer(&model, emitter)`
+returns the emitter on success. Use `&mut E` to keep partial output and recover after
+failure. Blanket forwarding for `Box<T>` and `&mut T` supports trait objects too, but
+the default path is statically dispatched: no enum, box or runtime backend selection.
 
-For explicit legacy output, construct `Serializer::new(xml::EventWriter::new_with_config(
-writer, emitter_config))`. It retains the supplied writer's exact configuration and state,
-even when quick-xml is enabled. `Serializer<W>` and `YaSerialize` retain their signatures.
-Legacy `Serializer::write(xml::writer::XmlEvent)` accepts every event variant on either
-backend. On quick-xml it translates events in place, sharing namespace, element and
-formatting state with neutral helpers, without falling back to xml-rs.
+`DefaultXmlWriter<W>` is a compile-time alias for `QuickXmlWriter<W>` when
+`quick-xml-backend` is enabled, otherwise `XmlRsWriter<W>`. Both expose
+`from_writer(byte_sink, &Config)` and `into_inner() -> W`.
+`XmlRsWriter::new(xml::EventWriter<W>)` preserves supplied configuration and state.
+
+### Low-level source migration
+
+- Change handwritten `serialize<W: Write>` to `serialize<E: XmlEventWriter>` and
+  `Serializer<W>` to `Serializer<E>`. Update YaSerDe and its derive crate together.
+- Wrap explicit legacy writers: `Serializer::new(XmlRsWriter::new(xml_writer))`.
+- Extract bytes with `serializer.into_inner().into_inner()`, not one extraction.
+- Implement the new required `write_legacy_event` on existing custom emitters.
+- `Serializer::new_from_writer(sink, &config)` and `new_for_inner(sink)` retain inference.
+  High-level `to_string`, config, byte-writer and content-only helpers are unchanged.
+
+```rust,ignore
+use yaserde::ser::{serialize_with_event_writer, Config};
+use yaserde::xml::DefaultXmlWriter;
+let mut emitter = DefaultXmlWriter::from_writer(Vec::new(), &Config::default());
+serialize_with_event_writer(&model, &mut emitter)?;
+let bytes = emitter.into_inner();
+```
 
 ### Native writer compatibility
 
@@ -237,9 +258,11 @@ relative to xml-rs 0.8 are attribute TAB references (`&#x9;`, alongside LF/CR re
 and explicit `xmlns=""` for default-namespace unbinding. These preserve parsed values and
 namespace semantics; explicitly supplied xml-rs writers keep legacy behavior.
 
-The xml-rs dependency remains necessary for the compatibility signatures and flatten
-capture during deserialization. Writer injection and CWMP-specific namespace overrides
-are outside this API.
+The xml-rs dependency remains necessary for legacy signatures and deserialization flatten
+capture. Namespace policy is not part of `Serializer` or `Config`: implement an
+application-owned `XmlEventWriter` wrapper when needed. Apply it to namespace bindings
+and name metadata, not text/attribute values or QName spelling. Both event methods must
+honor the policy; the library intentionally has no namespace substitution setter.
 
 ---
 
@@ -528,7 +551,7 @@ fn my_backend_parity() {
 |---|---|
 | `next_event()` | **Always** — minimum viable reader |
 | `supports_light_events()` → `true` + light methods | For better performance with derived code |
-| `XmlEventWriter::write_event()` | Standalone writer adapters, not `Serializer` injection |
+| `XmlEventWriter::{write_event, write_legacy_event}` | Injected emitters and application-owned writer wrappers |
 
 The trait defaults ensure that implementing **only** `next_event()` gives you a working
 backend.  Add the light-event methods when you want the derive macros to take the fast

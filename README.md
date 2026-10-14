@@ -50,7 +50,7 @@ impl YaDeserialize for MyType {
 ```rust
 
 impl YaSerialize for MyType {
-  fn serialize<W: Write>(&self, writer: &mut yaserde::ser::Serializer<W>) -> Result<(), String> {
+  fn serialize<E: yaserde::xml::XmlEventWriter>(&self, writer: &mut yaserde::ser::Serializer<E>) -> Result<(), String> {
     // serializer code
   }
 }
@@ -75,12 +75,35 @@ When `quick-xml-backend` is enabled, `yaserde::de::from_str` and `from_reader` u
 
 The same feature selects native quick-xml serialization for `to_string`, `to_string_with_config`, writer-based helpers, and content-only serialization. It takes precedence even when the default `xml-rs-backend` feature is also enabled (including all-features builds). Without `quick-xml-backend`, serialization and deserialization continue to use xml-rs.
 
-`Serializer<W>` and `YaSerialize` signatures are unchanged. `Serializer::new(xml::EventWriter<W>)` explicitly retains that xml-rs writer, including its configuration and existing state. Legacy `Serializer::write(xml::writer::XmlEvent)` calls work on either backend and can be mixed with the neutral helper methods; they do not switch a quick-xml serializer back to xml-rs.
+**Low-level breaking change:** `Serializer<E: XmlEventWriter>` now owns an event emitter,
+not a byte sink. Handwritten `YaSerialize::serialize` implementations must replace the
+`W: Write` bound with `E: yaserde::xml::XmlEventWriter` (and regenerate derives together).
+`Serializer::new(XmlRsWriter::new(xml_writer))` retains an explicit xml-rs writer's
+configuration and existing state. `serializer.into_inner()` now returns the emitter;
+call its `into_inner()` again to extract the byte sink. High-level string, config,
+byte-writer and content-only helper signatures remain unchanged.
 
-The quick writer preserves YaSerDe's formatting, empty-element, namespace-scope and escaping conventions. It additionally emits attribute tabs as character references and writes `xmlns=""` when unbinding an inherited default namespace, avoiding content/namespace loss in xml-rs 0.8. The xml-rs dependency remains for the compatibility API and deserialization's flatten capture. Arbitrary public writer-backend injection and namespace-policy overrides are not provided.
+Inject custom emitters or policy wrappers without implementing `std::io::Write`:
+
+```rust,ignore
+let emitter = yaserde::xml::DefaultXmlWriter::from_writer(
+    Vec::new(), &yaserde::ser::Config::default(),
+);
+let emitter = yaserde::ser::serialize_with_event_writer(&model, emitter)?;
+let bytes = emitter.into_inner();
+```
+
+`DefaultXmlWriter<W>` is a compile-time alias for `QuickXmlWriter<W>` when enabled,
+otherwise `XmlRsWriter<W>`. Both are also available explicitly. Implement both
+`XmlEventWriter::write_event` and `write_legacy_event`; neutral helpers and raw legacy
+events always pass through the injected emitter. Legacy events/errors are re-exported
+as `yaserde::xml::{LegacyXmlEvent, LegacyXmlError}`. `Box<T>` and `&mut T` forward both
+methods; passing `&mut emitter` preserves access to partial output after errors.
+
+The quick writer preserves YaSerDe's formatting, empty-element, namespace-scope and escaping conventions. It additionally emits attribute tabs as character references and writes `xmlns=""` when unbinding an inherited default namespace, avoiding content/namespace loss in xml-rs 0.8. The xml-rs dependency remains for the compatibility API and deserialization's flatten capture. Namespace policy belongs in application-owned event-writer wrappers, not in the library.
 
 For runtime selection, pass a `Box<dyn yaserde::xml::XmlEventReader>` to `yaserde::de::from_reader_dyn`.
 
 Migration note: custom deserializers should use `yaserde::xml::XmlReadEvent` instead of matching `xml::reader::XmlEvent` directly.
 
-See [Implementing a Custom XML Backend](docs/custom-backend.md) for details on plugging in your own parser.
+See [Implementing a Custom XML Backend](docs/custom-backend.md) for the reader/writer contract and low-level API migration.
