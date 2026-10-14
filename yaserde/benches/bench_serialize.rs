@@ -147,9 +147,9 @@ fn de_quick_xml<T: yaserde::YaDeserialize>(xml: &str) -> T {
 
 fn ser_xml_rs<T: yaserde::YaSerialize>(model: &T) -> String {
     let writer = xml::EmitterConfig::new().create_writer(Cursor::new(Vec::new()));
-    let mut serializer = yaserde::ser::Serializer::new(writer);
+    let mut serializer = yaserde::ser::Serializer::new(yaserde::xml::XmlRsWriter::new(writer));
     model.serialize(&mut serializer).unwrap();
-    let cursor = serializer.into_inner();
+    let cursor = serializer.into_inner().into_inner();
     std::str::from_utf8(cursor.get_ref()).unwrap().to_owned()
 }
 
