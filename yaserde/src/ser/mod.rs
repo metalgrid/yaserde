@@ -4,11 +4,22 @@
 use crate::xml::{XmlAttribute, XmlNamespace, XmlWriteEvent};
 use crate::YaSerialize;
 use ::xml::writer::XmlEvent;
-use ::xml::{EmitterConfig, EventWriter};
+#[cfg(not(feature = "quick-xml-backend"))]
+use ::xml::EmitterConfig;
+use ::xml::EventWriter;
 use std::io::{Cursor, Write};
 use std::str;
 
-/// Serialize XML into a plain String with no formatting (EmitterConfig).
+#[cfg(feature = "quick-xml-backend")]
+mod quick_xml;
+
+enum Backend<W: Write> {
+  XmlRs(EventWriter<W>),
+  #[cfg(feature = "quick-xml-backend")]
+  Quick(quick_xml::QuickWriter<W>),
+}
+
+/// Serialize XML into a plain String with no formatting.
 pub fn to_string<T: YaSerialize>(model: &T) -> Result<String, String> {
   let buf = Cursor::new(Vec::new());
   let cursor = serialize_with_writer(model, buf, &Config::default())?;
@@ -16,7 +27,7 @@ pub fn to_string<T: YaSerialize>(model: &T) -> Result<String, String> {
   Ok(data.into())
 }
 
-/// Serialize XML into a plain String with control on formatting (via EmitterConfig parameters)
+/// Serialize XML into a plain String with control on formatting.
 pub fn to_string_with_config<T: YaSerialize>(model: &T, config: &Config) -> Result<String, String> {
   let buf = Cursor::new(Vec::new());
   let cursor = serialize_with_writer(model, buf, config)?;
@@ -56,41 +67,62 @@ pub fn serialize_with_writer_content<W: Write, T: YaSerialize>(
 }
 
 pub struct Serializer<W: Write> {
-  writer: EventWriter<W>,
+  writer: Backend<W>,
   skip_start_end: bool,
   start_event_name: Option<String>,
 }
 
 impl<W: Write> Serializer<W> {
+  /// Retain an explicitly supplied xml-rs writer, including its configuration and state.
   pub fn new(writer: EventWriter<W>) -> Self {
     Serializer {
-      writer,
+      writer: Backend::XmlRs(writer),
       skip_start_end: false,
       start_event_name: None,
     }
   }
 
+  /// Use quick-xml when `quick-xml-backend` is enabled, otherwise xml-rs.
   pub fn new_from_writer(writer: W, config: &Config) -> Self {
-    let mut emitter_config = EmitterConfig::new()
-      .cdata_to_characters(false)
-      .perform_indent(config.perform_indent)
-      .write_document_declaration(config.write_document_declaration);
-
-    if let Some(indent_string_value) = &config.indent_string {
-      emitter_config = emitter_config.indent_string(indent_string_value.clone());
+    #[cfg(feature = "quick-xml-backend")]
+    {
+      Self {
+        writer: Backend::Quick(quick_xml::QuickWriter::new(writer, config)),
+        skip_start_end: false,
+        start_event_name: None,
+      }
     }
+    #[cfg(not(feature = "quick-xml-backend"))]
+    {
+      let mut emitter_config = EmitterConfig::new()
+        .cdata_to_characters(false)
+        .perform_indent(config.perform_indent)
+        .write_document_declaration(config.write_document_declaration);
 
-    Self::new(EventWriter::new_with_config(writer, emitter_config))
+      if let Some(indent_string_value) = &config.indent_string {
+        emitter_config = emitter_config.indent_string(indent_string_value.clone());
+      }
+
+      Self::new(EventWriter::new_with_config(writer, emitter_config))
+    }
   }
 
   pub fn new_for_inner(writer: W) -> Self {
-    let config = EmitterConfig::new().write_document_declaration(false);
-
-    Self::new(EventWriter::new_with_config(writer, config))
+    Self::new_from_writer(
+      writer,
+      &Config {
+        write_document_declaration: false,
+        ..Config::default()
+      },
+    )
   }
 
   pub fn into_inner(self) -> W {
-    self.writer.into_inner()
+    match self.writer {
+      Backend::XmlRs(writer) => writer.into_inner(),
+      #[cfg(feature = "quick-xml-backend")]
+      Backend::Quick(writer) => writer.into_inner(),
+    }
   }
 
   pub fn skip_start_end(&self) -> bool {
@@ -113,7 +145,11 @@ impl<W: Write> Serializer<W> {
   where
     E: Into<XmlEvent<'a>>,
   {
-    self.writer.write(event)
+    match &mut self.writer {
+      Backend::XmlRs(writer) => writer.write(event),
+      #[cfg(feature = "quick-xml-backend")]
+      Backend::Quick(writer) => writer.write(event.into()),
+    }
   }
 
   pub fn write_event(&mut self, event: XmlWriteEvent<'_>) -> Result<(), String> {
@@ -135,7 +171,30 @@ impl<W: Write> Serializer<W> {
     attributes: Vec<XmlAttribute>,
     namespace: XmlNamespace,
   ) -> Result<(), String> {
-    let name = ::xml::name::OwnedName::local(name.into());
+    let name = name.into();
+    #[cfg(feature = "quick-xml-backend")]
+    if let Backend::Quick(writer) = &mut self.writer {
+      return writer
+        .start(
+          ::xml::name::Name::local(&name),
+          attributes.iter().map(|a| {
+            (
+              ::xml::name::Name {
+                local_name: &a.name.local_name,
+                namespace: a.name.namespace.as_deref(),
+                prefix: a.name.prefix.as_deref(),
+              },
+              a.value.as_str(),
+            )
+          }),
+          namespace
+            .0
+            .iter()
+            .map(|(prefix, uri)| (prefix.as_str(), uri.as_str())),
+        )
+        .map_err(|e| e.to_string());
+    }
+    let name = ::xml::name::OwnedName::local(name);
     let attributes: Vec<_> = attributes
       .iter()
       .map(|attribute| attribute.to_xml_rs())
@@ -145,7 +204,6 @@ impl<W: Write> Serializer<W> {
       .map(|attribute| attribute.borrow())
       .collect();
     self
-      .writer
       .write(::xml::writer::events::XmlEvent::StartElement {
         name: name.borrow(),
         attributes: ::std::borrow::Cow::Owned(attributes),
@@ -156,23 +214,48 @@ impl<W: Write> Serializer<W> {
 
   pub fn write_end_element(&mut self) -> Result<(), String> {
     self
-      .writer
       .write(::xml::writer::XmlEvent::end_element())
       .map_err(|e| e.to_string())
   }
 
   pub fn write_characters(&mut self, text: &str) -> Result<(), String> {
     self
-      .writer
       .write(::xml::writer::XmlEvent::characters(text))
       .map_err(|e| e.to_string())
   }
 
   pub fn write_cdata(&mut self, text: &str) -> Result<(), String> {
     self
-      .writer
       .write(::xml::writer::events::XmlEvent::cdata(text))
       .map_err(|e| e.to_string())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn constructors_select_and_retain_the_backend() {
+    let mut selected = Serializer::new_from_writer(Vec::new(), &Config::default());
+    let inner = Serializer::new_for_inner(Vec::new());
+    #[cfg(feature = "quick-xml-backend")]
+    {
+      assert!(matches!(selected.writer, Backend::Quick(_)));
+      assert!(matches!(inner.writer, Backend::Quick(_)));
+    }
+    #[cfg(not(feature = "quick-xml-backend"))]
+    {
+      assert!(matches!(selected.writer, Backend::XmlRs(_)));
+      assert!(matches!(inner.writer, Backend::XmlRs(_)));
+    }
+    selected.write(XmlEvent::start_element("legacy")).unwrap();
+    selected.write_characters("neutral").unwrap();
+    selected.write(XmlEvent::end_element()).unwrap();
+    #[cfg(feature = "quick-xml-backend")]
+    assert!(matches!(selected.writer, Backend::Quick(_)));
+    let explicit = Serializer::new(EventWriter::new(Vec::new()));
+    assert!(matches!(explicit.writer, Backend::XmlRs(_)));
   }
 }
 
