@@ -3,7 +3,6 @@ extern crate yaserde;
 #[macro_use]
 extern crate yaserde_derive;
 
-use std::io::Write;
 use yaserde::YaSerialize;
 
 #[test]
@@ -383,7 +382,10 @@ fn ser_custom() {
   }
 
   impl YaSerialize for Day {
-    fn serialize<W: Write>(&self, writer: &mut yaserde::ser::Serializer<W>) -> Result<(), String> {
+    fn serialize<W: yaserde::xml::XmlEventWriter>(
+      &self,
+      writer: &mut yaserde::ser::Serializer<W>,
+    ) -> Result<(), String> {
       writer.write_start_element("DoubleDay", Vec::new(), yaserde::xml::XmlNamespace::empty())?;
       writer.write_characters(&(self.value * 2).to_string())?;
       writer.write_end_element()

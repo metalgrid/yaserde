@@ -21,7 +21,7 @@ pub fn implement_serializer(
   quote! {
     impl #impl_generics ::yaserde::YaSerialize for #name #ty_generics #where_clause {
       #[allow(unused_variables)]
-      fn serialize<W: ::std::io::Write>(
+      fn serialize<W: ::yaserde::xml::XmlEventWriter>(
         &self,
         writer: &mut ::yaserde::ser::Serializer<W>,
       ) -> ::std::result::Result<(), ::std::string::String> {

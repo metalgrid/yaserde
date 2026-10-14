@@ -88,8 +88,6 @@ extern crate yaserde_derive;
 #[doc(hidden)]
 pub use yaserde_derive::*;
 
-use std::io::Write;
-
 pub mod de;
 pub mod primitives;
 pub mod ser;
@@ -104,7 +102,10 @@ pub trait YaDeserialize: Sized {
 
 /// A **data structure** that can be serialized into any data format supported by YaSerDe.
 pub trait YaSerialize: Sized {
-  fn serialize<W: Write>(&self, writer: &mut ser::Serializer<W>) -> Result<(), String>;
+  fn serialize<W: crate::xml::XmlEventWriter>(
+    &self,
+    writer: &mut ser::Serializer<W>,
+  ) -> Result<(), String>;
 
   fn serialize_attributes(
     &self,
@@ -170,7 +171,10 @@ pub trait Visitor<'de>: Sized {
 macro_rules! serialize_type {
   ($type:ty) => {
     impl YaSerialize for $type {
-      fn serialize<W: Write>(&self, writer: &mut ser::Serializer<W>) -> Result<(), String> {
+      fn serialize<W: crate::xml::XmlEventWriter>(
+        &self,
+        writer: &mut ser::Serializer<W>,
+      ) -> Result<(), String> {
         let content = format!("{}", self);
         writer.write_characters(&content)
       }

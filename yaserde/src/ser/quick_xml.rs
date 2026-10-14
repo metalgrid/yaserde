@@ -23,7 +23,7 @@ struct Element {
   content: Content,
 }
 
-pub(super) struct QuickWriter<W: Write> {
+pub struct QuickXmlWriter<W: Write> {
   writer: Writer<W>,
   elements: Vec<Element>,
   outer_content: Content,
@@ -33,8 +33,8 @@ pub(super) struct QuickWriter<W: Write> {
   indent: Option<String>,
 }
 
-impl<W: Write> QuickWriter<W> {
-  pub(super) fn new(writer: W, config: &Config) -> Self {
+impl<W: Write> QuickXmlWriter<W> {
+  pub fn from_writer(writer: W, config: &Config) -> Self {
     Self {
       writer: Writer::new(writer),
       elements: Vec::new(),
@@ -50,7 +50,7 @@ impl<W: Write> QuickWriter<W> {
     }
   }
 
-  pub(super) fn into_inner(self) -> W {
+  pub fn into_inner(self) -> W {
     self.writer.into_inner()
   }
 
@@ -292,4 +292,38 @@ fn push_attribute(start: &mut BytesStart<'_>, name: &str, value: &str) {
   };
   // The byte-slice attribute constructor accepts already escaped content.
   start.push_attribute((name.as_bytes(), escaped.as_bytes()));
+}
+
+impl<W: Write> crate::xml::XmlEventWriter for QuickXmlWriter<W> {
+  fn write_event(&mut self, event: crate::xml::XmlWriteEvent<'_>) -> std::result::Result<(), String> {
+    use crate::xml::XmlWriteEvent;
+    match event {
+      XmlWriteEvent::StartElement {
+        name,
+        attributes,
+        namespace,
+      } => self.start(
+        Name::local(&name),
+        attributes.iter().map(|a| {
+          (
+            Name {
+              local_name: &a.name.local_name,
+              namespace: a.name.namespace.as_deref(),
+              prefix: a.name.prefix.as_deref(),
+            },
+            a.value.as_str(),
+          )
+        }),
+        namespace.0.iter().map(|(p, u)| (p.as_str(), u.as_str())),
+      ),
+      XmlWriteEvent::EndElement => self.end(None),
+      XmlWriteEvent::Characters(text) => self.characters(&text),
+      XmlWriteEvent::CData(text) => self.cdata(&text),
+    }
+    .map_err(|e| e.to_string())
+  }
+
+  fn write_legacy_event(&mut self, event: XmlEvent<'_>) -> Result<()> {
+    self.write(event)
+  }
 }

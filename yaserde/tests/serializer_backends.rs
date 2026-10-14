@@ -4,30 +4,35 @@ use xml::common::XmlVersion;
 use xml::name::Name;
 use xml::writer::{EmitterConfig, Error, EventWriter, XmlEvent};
 use yaserde::ser::{Config, Serializer};
-use yaserde::xml::{XmlAttribute, XmlName, XmlNamespace, XmlWriteEvent};
+use yaserde::xml::{
+  XmlAttribute, XmlEventWriter, XmlName, XmlNamespace, XmlRsWriter, XmlWriteEvent,
+};
 
-fn legacy(config: &Config) -> Serializer<Vec<u8>> {
-  Serializer::new(EventWriter::new_with_config(
+fn legacy(config: &Config) -> Serializer<XmlRsWriter<Vec<u8>>> {
+  Serializer::new(XmlRsWriter::new(EventWriter::new_with_config(
     Vec::new(),
     EmitterConfig::new()
       .perform_indent(config.perform_indent)
       .write_document_declaration(config.write_document_declaration)
       .indent_string(config.indent_string.clone().unwrap_or_else(|| "  ".into())),
-  ))
+  )))
 }
 
-fn compare(config: &Config, emit: impl Fn(&mut Serializer<Vec<u8>>)) -> String {
-  let mut explicit = legacy(config);
-  let mut selected = Serializer::new_from_writer(Vec::new(), config);
-  emit(&mut explicit);
-  emit(&mut selected);
-  let expected = explicit.into_inner();
-  let actual = selected.into_inner();
-  assert_eq!(
-    String::from_utf8_lossy(&actual),
-    String::from_utf8_lossy(&expected)
-  );
-  String::from_utf8(actual).unwrap()
+macro_rules! compare {
+  ($config:expr, |$s:ident| $body:expr $(,)?) => {{
+    let config = $config;
+    let mut explicit = legacy(config);
+    let mut selected = Serializer::new_from_writer(Vec::new(), config);
+    { let $s = &mut explicit; $body; }
+    { let $s = &mut selected; $body; }
+    let expected = explicit.into_inner().into_inner();
+    let actual = selected.into_inner().into_inner();
+    assert_eq!(
+      String::from_utf8_lossy(&actual),
+      String::from_utf8_lossy(&expected)
+    );
+    String::from_utf8(actual).unwrap()
+  }};
 }
 
 fn namespace(bindings: &[(&str, &str)]) -> XmlNamespace {
@@ -39,14 +44,14 @@ fn namespace(bindings: &[(&str, &str)]) -> XmlNamespace {
   )
 }
 
-fn start<W: Write>(s: &mut Serializer<W>, name: &str) {
+fn start<W: XmlEventWriter>(s: &mut Serializer<W>, name: &str) {
   s.write_start_element(name, Vec::new(), XmlNamespace::empty())
     .unwrap();
 }
 
 #[test]
 fn every_legacy_variant_interleaved_with_neutral_events() {
-  let output = compare(&Config::default(), |s| {
+  let output = compare!(&Config::default(), |s| {
     s.write(XmlEvent::StartDocument {
       version: XmlVersion::Version11,
       encoding: Some("UTF-8"),
@@ -102,7 +107,7 @@ fn every_legacy_variant_interleaved_with_neutral_events() {
 
 #[test]
 fn empty_text_is_not_an_empty_element() {
-  let output = compare(
+  let output = compare!(
     &Config {
       write_document_declaration: false,
       ..Config::default()
@@ -131,7 +136,7 @@ fn empty_text_is_not_an_empty_element() {
 fn mixed_content_and_arbitrary_indent_strings() {
   for indent in [None, Some(""), Some("\t"), Some("→雪 ")] {
     for perform_indent in [false, true] {
-      compare(
+      compare!(
         &Config {
           perform_indent,
           indent_string: indent.map(Into::into),
@@ -160,7 +165,7 @@ fn mixed_content_and_arbitrary_indent_strings() {
 
 #[test]
 fn namespace_dedup_shadow_and_sibling_restoration() {
-  let output = compare(&Config::default(), |s| {
+  let output = compare!(&Config::default(), |s| {
     let outer = namespace(&[
       ("p", "urn:outer"),
       ("", "urn:default"),
@@ -204,7 +209,7 @@ fn declaration_timing_and_fragments() {
       XmlEvent::characters(""),
       XmlEvent::processing_instruction("pi", None),
     ] {
-      compare(&config, |s| {
+      compare!(&config, |s| {
         s.write(first.clone()).unwrap();
         start(s, "one");
         s.write_end_element().unwrap();
@@ -218,12 +223,15 @@ fn declaration_timing_and_fragments() {
   start(&mut inner, "child");
   inner.write_end_element().unwrap();
   inner.write_cdata("after").unwrap();
-  assert_eq!(inner.into_inner(), b"before<child /><![CDATA[after]]>");
+  assert_eq!(
+    inner.into_inner().into_inner(),
+    b"before<child /><![CDATA[after]]>"
+  );
 }
 
 #[test]
 fn declaration_defaults_and_duplicate_errors() {
-  compare(&Config::default(), |s| {
+  compare!(&Config::default(), |s| {
     s.write(XmlEvent::StartDocument {
       version: XmlVersion::Version10,
       encoding: None,
@@ -245,7 +253,7 @@ fn declaration_defaults_and_duplicate_errors() {
 
 #[test]
 fn names_preserve_literal_vs_split_identity() {
-  compare(&Config::default(), |s| {
+  compare!(&Config::default(), |s| {
     start(s, "p:literal");
     s.write(XmlEvent::EndElement {
       name: Some(Name::local("p:literal")),
@@ -258,12 +266,7 @@ fn names_preserve_literal_vs_split_identity() {
     })
     .unwrap();
   });
-  for explicit in [false, true] {
-    let mut s = if explicit {
-      legacy(&Config::default())
-    } else {
-      Serializer::new_from_writer(Vec::new(), &Config::default())
-    };
+  fn check<E: XmlEventWriter>(mut s: Serializer<E>) {
     assert!(matches!(
       s.write(XmlEvent::end_element()),
       Err(Error::LastElementNameNotAvailable)
@@ -274,6 +277,8 @@ fn names_preserve_literal_vs_split_identity() {
       Err(Error::EndElementNameIsNotEqualToLastStartElementName)
     ));
   }
+  check(legacy(&Config::default()));
+  check(Serializer::new_from_writer(Vec::new(), &Config::default()));
 }
 
 #[test]
@@ -301,7 +306,7 @@ fn explicit_legacy_writer_preserves_configuration_and_existing_state() {
   expected.write(XmlEvent::end_element()).unwrap();
   expected.write(XmlEvent::comment("hi")).unwrap();
   expected.write(XmlEvent::end_element()).unwrap();
-  let mut actual = Serializer::new(prepared());
+  let mut actual = Serializer::new(XmlRsWriter::new(prepared()));
   actual
     .write_start_element("p:child", Vec::new(), namespace(&[("p", "urn:p")]))
     .unwrap();
@@ -309,7 +314,7 @@ fn explicit_legacy_writer_preserves_configuration_and_existing_state() {
   actual.write_end_element().unwrap();
   actual.write(XmlEvent::comment("hi")).unwrap();
   actual.write_end_element().unwrap();
-  assert_eq!(actual.into_inner(), expected.into_inner());
+  assert_eq!(actual.into_inner().into_inner(), expected.into_inner());
 }
 
 struct LimitedSink {
@@ -347,7 +352,7 @@ fn every_output_byte_is_written_by_a_fallible_event_not_into_inner() {
   for event in &events {
     good.write(event.clone()).unwrap();
   }
-  let expected = good.into_inner();
+  let expected = good.into_inner().into_inner();
   for remaining in 0..expected.len() {
     let mut s = Serializer::new_from_writer(
       LimitedSink {
@@ -361,7 +366,7 @@ fn every_output_byte_is_written_by_a_fallible_event_not_into_inner() {
       .find_map(|event| s.write(event.clone()).err())
       .expect("write must fail");
     assert!(matches!(error, Error::Io(ref e) if e.kind() == io::ErrorKind::BrokenPipe));
-    assert_eq!(s.into_inner().bytes, expected[..remaining]);
+    assert_eq!(s.into_inner().into_inner().bytes, expected[..remaining]);
   }
   let mut s = Serializer::new_from_writer(
     LimitedSink {
@@ -382,7 +387,7 @@ fn unfinished_start_is_not_silently_buffered_or_flushed() {
     write_document_declaration: false,
     ..Config::default()
   };
-  let output = compare(&config, |s| start(s, "unfinished"));
+  let output = compare!(&config, |s| start(s, "unfinished"));
   assert_eq!(output, "<unfinished");
 }
 
@@ -405,7 +410,7 @@ fn quick_preserves_attribute_whitespace_and_default_namespace_unbinding() {
   start(&mut s, "restored");
   s.write_end_element().unwrap();
   s.write_end_element().unwrap();
-  let output = String::from_utf8(s.into_inner()).unwrap();
+  let output = String::from_utf8(s.into_inner().into_inner()).unwrap();
   assert!(output.contains("&#x9;&#xA;&#xD;"));
   assert_eq!(output.matches("xmlns=\"\"").count(), 1);
   for event in xml::reader::EventReader::from_str(&output) {

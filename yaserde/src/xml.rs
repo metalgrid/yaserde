@@ -220,8 +220,7 @@ impl From<&XmlReadEvent> for XmlLightEvent {
   }
 }
 
-/// Parser-neutral XML write events accepted by `ser::Serializer`.
-/// The serializer selects quick-xml with `quick-xml-backend`, otherwise xml-rs.
+/// Parser-neutral XML write events accepted by injected emitters.
 #[derive(Clone, Debug, PartialEq)]
 pub enum XmlWriteEvent<'a> {
   StartElement {
@@ -285,14 +284,41 @@ impl<T: XmlEventReader + ?Sized> XmlEventReader for Box<T> {
   }
 }
 
-/// Low-level writer trait for XML emitter backends.
+/// Legacy events retain borrowed names, comments, PI and declarations.
+pub use xml::writer::{Error as LegacyXmlError, XmlEvent as LegacyXmlEvent};
+
+#[cfg(feature = "quick-xml-backend")]
+pub use crate::ser::quick_xml::QuickXmlWriter;
+
+/// Compile-time default emitter; no runtime backend dispatch.
+#[cfg(feature = "quick-xml-backend")]
+pub type DefaultXmlWriter<W> = QuickXmlWriter<W>;
+#[cfg(not(feature = "quick-xml-backend"))]
+pub type DefaultXmlWriter<W> = XmlRsWriter<W>;
+
+/// Low-level writer trait. Both event representations must pass through wrappers.
 pub trait XmlEventWriter {
   fn write_event(&mut self, event: XmlWriteEvent<'_>) -> Result<(), String>;
+  fn write_legacy_event(&mut self, event: LegacyXmlEvent<'_>) -> Result<(), LegacyXmlError>;
 }
 
 impl<T: XmlEventWriter + ?Sized> XmlEventWriter for Box<T> {
   fn write_event(&mut self, event: XmlWriteEvent<'_>) -> Result<(), String> {
     self.as_mut().write_event(event)
+  }
+
+  fn write_legacy_event(&mut self, event: LegacyXmlEvent<'_>) -> Result<(), LegacyXmlError> {
+    self.as_mut().write_legacy_event(event)
+  }
+}
+
+impl<T: XmlEventWriter + ?Sized> XmlEventWriter for &mut T {
+  fn write_event(&mut self, event: XmlWriteEvent<'_>) -> Result<(), String> {
+    (**self).write_event(event)
+  }
+
+  fn write_legacy_event(&mut self, event: LegacyXmlEvent<'_>) -> Result<(), LegacyXmlError> {
+    (**self).write_legacy_event(event)
   }
 }
 
@@ -352,7 +378,7 @@ impl<R: Read> XmlEventReader for XmlRsReader<R> {
   }
 }
 
-/// Explicit `xml-rs` writer adapter for the standalone `XmlEventWriter` trait.
+/// Explicit `xml-rs` emitter, preserving supplied writer state and configuration.
 pub struct XmlRsWriter<W: std::io::Write> {
   inner: ::xml::writer::EventWriter<W>,
 }
@@ -362,12 +388,27 @@ impl<W: std::io::Write> XmlRsWriter<W> {
     Self { inner }
   }
 
+  pub fn from_writer(writer: W, config: &crate::ser::Config) -> Self {
+    let mut emitter = ::xml::EmitterConfig::new()
+      .cdata_to_characters(false)
+      .perform_indent(config.perform_indent)
+      .write_document_declaration(config.write_document_declaration);
+    if let Some(indent) = &config.indent_string {
+      emitter = emitter.indent_string(indent.clone());
+    }
+    Self::new(emitter.create_writer(writer))
+  }
+
   pub fn into_inner(self) -> W {
     self.inner.into_inner()
   }
 }
 
 impl<W: std::io::Write> XmlEventWriter for XmlRsWriter<W> {
+  fn write_legacy_event(&mut self, event: LegacyXmlEvent<'_>) -> Result<(), LegacyXmlError> {
+    self.inner.write(event)
+  }
+
   fn write_event(&mut self, event: XmlWriteEvent<'_>) -> Result<(), String> {
     match event {
       XmlWriteEvent::StartElement {

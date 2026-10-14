@@ -1,8 +1,6 @@
-use std::io::Write;
-
 use crate::{de, ser};
 
-pub fn serialize_primitives<S, W: Write>(
+pub fn serialize_primitives<S, W: crate::xml::XmlEventWriter>(
   self_bypass: &S,
   default_name: &str,
   writer: &mut ser::Serializer<W>,
