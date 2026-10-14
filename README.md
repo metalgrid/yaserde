@@ -56,7 +56,7 @@ impl YaSerialize for MyType {
 }
 ```
 
-## XML parser backends
+## XML backends
 
 YaSerDe's deserializer is generic over `yaserde::xml::XmlEventReader`, so parser backends can be selected explicitly:
 
@@ -72,6 +72,12 @@ yaserde = { version = "...", features = ["quick-xml-backend"] }
 ```
 
 When `quick-xml-backend` is enabled, `yaserde::de::from_str` and `from_reader` use quick-xml by default. Generated deserializers automatically use parser-neutral light-event and simple-text fast paths when available, avoiding full XML event materialization for common leaf fields while keeping the backend swappable.
+
+The same feature selects native quick-xml serialization for `to_string`, `to_string_with_config`, writer-based helpers, and content-only serialization. It takes precedence even when the default `xml-rs-backend` feature is also enabled (including all-features builds). Without `quick-xml-backend`, serialization and deserialization continue to use xml-rs.
+
+`Serializer<W>` and `YaSerialize` signatures are unchanged. `Serializer::new(xml::EventWriter<W>)` explicitly retains that xml-rs writer, including its configuration and existing state. Legacy `Serializer::write(xml::writer::XmlEvent)` calls work on either backend and can be mixed with the neutral helper methods; they do not switch a quick-xml serializer back to xml-rs.
+
+The quick writer preserves YaSerDe's formatting, empty-element, namespace-scope and escaping conventions. It additionally emits attribute tabs as character references and writes `xmlns=""` when unbinding an inherited default namespace, avoiding content/namespace loss in xml-rs 0.8. The xml-rs dependency remains for the compatibility API and deserialization's flatten capture. Arbitrary public writer-backend injection and namespace-policy overrides are not provided.
 
 For runtime selection, pass a `Box<dyn yaserde::xml::XmlEventReader>` to `yaserde::de::from_reader_dyn`.
 

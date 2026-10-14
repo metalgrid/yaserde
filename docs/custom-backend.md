@@ -1,9 +1,9 @@
 # Implementing a Custom XML Backend
 
-YaSerDe's parser layer is built around two traits — `XmlEventReader` for deserialization and
-`XmlEventWriter` for serialization — plus a set of shared value types.  Implementing these
-traits lets you plug in any XML parser or emitter while keeping all derived (`#[derive(YaDeserialize)]`)
-code working unchanged.
+YaSerDe's parser layer uses `XmlEventReader` for pluggable deserialization, plus shared
+XML value types. Implementing this trait lets you plug in a parser while keeping derived
+`#[derive(YaDeserialize)]` code unchanged. The standalone `XmlEventWriter` trait describes
+neutral write events, but is not a public injection point for `Serializer<W>`.
 
 This document walks through every type and method you need to implement, with a complete
 worked example at the end.
@@ -204,11 +204,42 @@ A single method.  Receive a `XmlWriteEvent` and emit the corresponding XML.  The
 implementation must handle all four variants (`StartElement`, `EndElement`, `Characters`,
 `CData`).  Return `Err(String)` on I/O errors or well-formedness violations.
 
-> **Note:** Serialization is currently less pluggable than deserialization.  The
-> `Serializer<W>` struct in `yaserde::ser` wraps an `xml::writer::EventWriter` directly.
-> The `XmlEventWriter` trait exists as the future abstraction boundary.  For now,
-> implementing `XmlEventWriter` prepares your backend for when serialization is fully
-> decoupled.
+`Serializer<W>` uses a private backend selected by Cargo features: native quick-xml when
+`quick-xml-backend` is enabled, otherwise xml-rs. This includes `to_string`,
+`to_string_with_config`, `serialize_with_writer`, and content-only helpers. There is no
+public arbitrary-writer injection API; implementing `XmlEventWriter` alone does not wire
+a custom emitter into derived serialization.
+
+For explicit legacy output, construct `Serializer::new(xml::EventWriter::new_with_config(
+writer, emitter_config))`. It retains the supplied writer's exact configuration and state,
+even when quick-xml is enabled. `Serializer<W>` and `YaSerialize` retain their signatures.
+Legacy `Serializer::write(xml::writer::XmlEvent)` accepts every event variant on either
+backend. On quick-xml it translates events in place, sharing namespace, element and
+formatting state with neutral helpers, without falling back to xml-rs.
+
+### Native writer compatibility
+
+The quick writer supports namespace deduplication, shadowing and restoration, fragments,
+optional declarations, arbitrary UTF-8 indentation strings and mixed content. Empty
+`Characters("")` is significant: an empty start/end pair produces `<x />`, whereas a
+start/empty-text/end sequence produces `<x></x>`. Start-tag bytes are written immediately;
+only the terminator is pending until the next event. `into_inner` never performs I/O or
+completes an unfinished element, so callers must close their elements with fallible writes.
+
+Text, attributes and namespace URIs are escaped once; CDATA terminators are split safely.
+Comments retain xml-rs's default padding/sanitization, and processing instructions retain
+their target/data syntax. Named end events check the full supplied name, including its
+prefix and namespace, rather than treating a literal `p:x` local name as a split name.
+
+Compatibility covers existing YaSerDe byte fixtures and valid event streams, not every
+undocumented xml-rs behavior or malformed-input recovery. Two intentional improvements
+relative to xml-rs 0.8 are attribute TAB references (`&#x9;`, alongside LF/CR references)
+and explicit `xmlns=""` for default-namespace unbinding. These preserve parsed values and
+namespace semantics; explicitly supplied xml-rs writers keep legacy behavior.
+
+The xml-rs dependency remains necessary for the compatibility signatures and flatten
+capture during deserialization. Writer injection and CWMP-specific namespace overrides
+are outside this API.
 
 ---
 
@@ -239,12 +270,14 @@ let value: MyStruct = from_reader_dyn(parser)?;
 
 ### Choosing the default backend
 
-YaSerDe selects the default reader based on Cargo features:
+YaSerDe selects the default reader and serializer based on Cargo features:
 
-| Feature flag | `from_reader` uses |
-|---|---|
-| *(none)* | `XmlRsReader` (xml-rs) |
-| `quick-xml-backend` | `QuickXmlReader` (quick-xml) |
+| Feature flags | Default reader | Default serializer |
+|---|---|---|
+| *(none)* or only `xml-rs-backend` (default) | `XmlRsReader` | xml-rs |
+| `quick-xml-backend` (with or without `xml-rs-backend`) | `QuickXmlReader` | native quick-xml |
+
+The quick feature takes precedence in all-features builds as well.
 
 Your custom backend is always available explicitly via `from_reader_with_parser` or
 `from_reader_dyn` regardless of which default is active.
@@ -495,7 +528,7 @@ fn my_backend_parity() {
 |---|---|
 | `next_event()` | **Always** — minimum viable reader |
 | `supports_light_events()` → `true` + light methods | For better performance with derived code |
-| `XmlEventWriter::write_event()` | For custom serialization backends (future-proofing) |
+| `XmlEventWriter::write_event()` | Standalone writer adapters, not `Serializer` injection |
 
 The trait defaults ensure that implementing **only** `next_event()` gives you a working
 backend.  Add the light-event methods when you want the derive macros to take the fast

@@ -220,8 +220,8 @@ impl From<&XmlReadEvent> for XmlLightEvent {
   }
 }
 
-/// Parser-neutral XML write events. Serialization still uses the xml-rs writer backend
-/// initially, but this type is the boundary for backend-neutral writers.
+/// Parser-neutral XML write events accepted by `ser::Serializer`.
+/// The serializer selects quick-xml with `quick-xml-backend`, otherwise xml-rs.
 #[derive(Clone, Debug, PartialEq)]
 pub enum XmlWriteEvent<'a> {
   StartElement {
@@ -352,7 +352,7 @@ impl<R: Read> XmlEventReader for XmlRsReader<R> {
   }
 }
 
-/// Transitional `xml-rs` writer adapter.
+/// Explicit `xml-rs` writer adapter for the standalone `XmlEventWriter` trait.
 pub struct XmlRsWriter<W: std::io::Write> {
   inner: ::xml::writer::EventWriter<W>,
 }
