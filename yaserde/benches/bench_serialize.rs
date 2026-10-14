@@ -143,11 +143,31 @@ fn de_quick_xml<T: yaserde::YaDeserialize>(xml: &str) -> T {
     yaserde::de::from_reader_with_parser(parser).unwrap()
 }
 
-// ── Serialize benchmarks (xml-rs writer only for now) ─────────────────────
+// ── Serialize benchmarks (same models, configuration and output allocation) ──
 
-/// Serialization currently always uses the xml-rs `EventWriter` regardless of
-/// the deserialization backend. These benchmarks establish a baseline so
-/// future writer-backend work can be compared.
+fn ser_xml_rs<T: yaserde::YaSerialize>(model: &T) -> String {
+    let writer = xml::EmitterConfig::new().create_writer(Cursor::new(Vec::new()));
+    let mut serializer = yaserde::ser::Serializer::new(writer);
+    model.serialize(&mut serializer).unwrap();
+    let cursor = serializer.into_inner();
+    std::str::from_utf8(cursor.get_ref()).unwrap().to_owned()
+}
+
+fn ser_quick_xml<T: yaserde::YaSerialize>(model: &T) -> String {
+    yaserde::ser::to_string(model).unwrap()
+}
+
+fn compare_writers<T: yaserde::YaSerialize>(c: &mut Criterion, name: &str, model: &T) {
+    assert_eq!(ser_xml_rs(model), ser_quick_xml(model));
+    let mut group = c.benchmark_group(name);
+    group.bench_function("xml-rs-writer", |b| {
+        b.iter(|| ser_xml_rs(black_box(model)))
+    });
+    group.bench_function("quick-xml-writer", |b| {
+        b.iter(|| ser_quick_xml(black_box(model)))
+    });
+    group.finish();
+}
 
 fn bench_serialize_simple(c: &mut Criterion) {
     let model = Simple {
@@ -156,13 +176,7 @@ fn bench_serialize_simple(c: &mut Criterion) {
         name: "Alice".into(),
         score: 98.6,
     };
-    let mut group = c.benchmark_group("serialize/simple_struct");
-    group.bench_function("xml-rs-writer", |b| {
-        b.iter(|| {
-            let _ = yaserde::ser::to_string(black_box(&model));
-        })
-    });
-    group.finish();
+    compare_writers(c, "serialize/simple_struct", &model);
 }
 
 fn bench_serialize_nested(c: &mut Criterion) {
@@ -180,37 +194,32 @@ fn bench_serialize_nested(c: &mut Criterion) {
             ],
         },
     };
-    let mut group = c.benchmark_group("serialize/nested_struct");
-    group.bench_function("xml-rs-writer", |b| {
-        b.iter(|| {
-            let _ = yaserde::ser::to_string(black_box(&model));
-        })
-    });
-    group.finish();
+    compare_writers(c, "serialize/nested_struct", &model);
 }
 
 fn bench_serialize_address_small(c: &mut Criterion) {
     let db: Database = de_quick_xml(ADDRESS_SMALL);
-    let mut group = c.benchmark_group("serialize/address-small");
-    group.sample_size(50);
-    group.bench_function("xml-rs-writer", |b| {
-        b.iter(|| {
-            let _ = yaserde::ser::to_string(black_box(&db));
-        })
-    });
-    group.finish();
+    compare_writers(c, "serialize/address-small", &db);
 }
 
 fn bench_serialize_address_middle(c: &mut Criterion) {
     let db: Database = de_quick_xml(ADDRESS_MIDDLE);
-    let mut group = c.benchmark_group("serialize/address-middle");
-    group.sample_size(20);
-    group.bench_function("xml-rs-writer", |b| {
-        b.iter(|| {
-            let _ = yaserde::ser::to_string(black_box(&db));
-        })
-    });
-    group.finish();
+    compare_writers(c, "serialize/address-middle", &db);
+}
+
+fn bench_serialize_namespaced(c: &mut Criterion) {
+    let model = NamespacedEnvelope { id: "42".into(), child: "value".into() };
+    compare_writers(c, "serialize/namespaced", &model);
+}
+
+fn bench_serialize_large(c: &mut Criterion) {
+    let model = LargeDoc {
+        entry: (0..1000).map(|i| Entry {
+            key: i.to_string(),
+            text: "some text with <escaping> & Unicode 雪".into(),
+        }).collect(),
+    };
+    compare_writers(c, "serialize/large", &model);
 }
 
 // ── Round-trip benchmarks ─────────────────────────────────────────────────
@@ -219,15 +228,15 @@ fn bench_roundtrip_address_small(c: &mut Criterion) {
     let db: Database = de_quick_xml(ADDRESS_SMALL);
     let mut group = c.benchmark_group("roundtrip/address-small");
     group.sample_size(30);
-    group.bench_function("xml-rs", |b| {
+    group.bench_function("xml-rs-reader+xml-rs-writer", |b| {
         b.iter(|| {
-            let xml = yaserde::ser::to_string(black_box(&db)).unwrap();
+            let xml = ser_xml_rs(black_box(&db));
             let _: Database = de_xml_rs(&xml);
         })
     });
-    group.bench_function("quick-xml", |b| {
+    group.bench_function("quick-xml-reader+quick-xml-writer", |b| {
         b.iter(|| {
-            let xml = yaserde::ser::to_string(black_box(&db)).unwrap();
+            let xml = ser_quick_xml(black_box(&db));
             let _: Database = de_quick_xml(&xml);
         })
     });
@@ -238,15 +247,15 @@ fn bench_roundtrip_address_middle(c: &mut Criterion) {
     let db: Database = de_quick_xml(ADDRESS_MIDDLE);
     let mut group = c.benchmark_group("roundtrip/address-middle");
     group.sample_size(10);
-    group.bench_function("xml-rs", |b| {
+    group.bench_function("xml-rs-reader+xml-rs-writer", |b| {
         b.iter(|| {
-            let xml = yaserde::ser::to_string(black_box(&db)).unwrap();
+            let xml = ser_xml_rs(black_box(&db));
             let _: Database = de_xml_rs(&xml);
         })
     });
-    group.bench_function("quick-xml", |b| {
+    group.bench_function("quick-xml-reader+quick-xml-writer", |b| {
         b.iter(|| {
-            let xml = yaserde::ser::to_string(black_box(&db)).unwrap();
+            let xml = ser_quick_xml(black_box(&db));
             let _: Database = de_quick_xml(&xml);
         })
     });
@@ -258,15 +267,15 @@ fn bench_roundtrip_address_big(c: &mut Criterion) {
     let mut group = c.benchmark_group("roundtrip/address-big");
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(60));
-    group.bench_function("xml-rs", |b| {
+    group.bench_function("xml-rs-reader+xml-rs-writer", |b| {
         b.iter(|| {
-            let xml = yaserde::ser::to_string(black_box(&db)).unwrap();
+            let xml = ser_xml_rs(black_box(&db));
             let _: Database = de_xml_rs(&xml);
         })
     });
-    group.bench_function("quick-xml", |b| {
+    group.bench_function("quick-xml-reader+quick-xml-writer", |b| {
         b.iter(|| {
-            let xml = yaserde::ser::to_string(black_box(&db)).unwrap();
+            let xml = ser_quick_xml(black_box(&db));
             let _: Database = de_quick_xml(&xml);
         })
     });
@@ -279,6 +288,8 @@ criterion_group!(
     serialize_benches,
     bench_serialize_simple,
     bench_serialize_nested,
+    bench_serialize_namespaced,
+    bench_serialize_large,
     bench_serialize_address_small,
     bench_serialize_address_middle,
 );
