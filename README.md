@@ -73,6 +73,13 @@ yaserde = { version = "...", features = ["quick-xml-backend"] }
 
 When `quick-xml-backend` is enabled, `yaserde::de::from_str` and `from_reader` use quick-xml by default. Generated deserializers automatically use parser-neutral light-event and simple-text fast paths when available, avoiding full XML event materialization for common leaf fields while keeping the backend swappable.
 
+The quick-xml reader coalesces adjacent ordinary text, XML references and CDATA
+before deserialization, including text split by ignored comments or processing
+instructions. References decode exactly once; entity spelling inside CDATA stays
+literal. Spaces between fragments are retained, outer ordinary-text whitespace is
+trimmed, and CDATA/reference whitespace is preserved. Coalescing stops at element
+boundaries. Unknown or malformed references return a parse error.
+
 The same feature selects native quick-xml serialization for `to_string`, `to_string_with_config`, writer-based helpers, and content-only serialization. It takes precedence even when the default `xml-rs-backend` feature is also enabled (including all-features builds). Without `quick-xml-backend`, serialization and deserialization continue to use xml-rs.
 
 **Low-level breaking change:** `Serializer<E: XmlEventWriter>` now owns an event emitter,
