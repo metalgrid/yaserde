@@ -472,6 +472,7 @@ mod quick_backend {
     cached: Option<InternalEvent>,
     materialized: Option<XmlReadEvent>,
     pending_ends: VecDeque<XmlName>,
+    pending_event: Option<InternalEvent>,
     eof: bool,
     seen_any: bool,
   }
@@ -488,6 +489,7 @@ mod quick_backend {
         cached: None,
         materialized: None,
         pending_ends: VecDeque::new(),
+        pending_event: None,
         eof: false,
         seen_any: false,
       }
@@ -566,30 +568,36 @@ mod quick_backend {
     }
 
     fn read_internal(&mut self) -> Result<InternalEvent, String> {
+      if let Some(event) = self.pending_event.take() {
+        return Ok(event);
+      }
+      if let Some(name) = self.pending_ends.pop_front() {
+        return Ok(InternalEvent::EndElement { name });
+      }
+      if self.eof {
+        if self.seen_any {
+          return Ok(InternalEvent::EndDocument);
+        }
+        return Err("Unexpected end of stream: no root element found".to_string());
+      }
+
+      // Derived text fields consume one value, not separate quick-xml
+      // Text / GeneralRef / CData fragments. Allocate only the output string.
+      let mut text = String::new();
+      let mut trim_end = 0;
       loop {
-        if let Some(name) = self.pending_ends.pop_front() {
-          return Ok(InternalEvent::EndElement { name });
-        }
-
-        if self.eof {
-          if self.seen_any {
-            return Ok(InternalEvent::EndDocument);
-          }
-          return Err("Unexpected end of stream: no root element found".to_string());
-        }
-
         self.buf.clear();
         let reader = &mut self.inner;
         let event = reader
           .read_event_into(&mut self.buf)
           .map_err(Self::map_quick_error)?;
-        match event {
+        let boundary = match event {
           Event::Start(start) => {
             self.seen_any = true;
             let (resolve, _) = reader.resolver().resolve_element(start.name());
             let name = Self::name_from_qname_with_resolve(start.name(), resolve)?;
             let attributes = Self::attributes_from_start(reader, &start)?;
-            return Ok(InternalEvent::StartElement { name, attributes });
+            InternalEvent::StartElement { name, attributes }
           }
           Event::Empty(start) => {
             self.seen_any = true;
@@ -597,41 +605,65 @@ mod quick_backend {
             let name = Self::name_from_qname_with_resolve(start.name(), resolve)?;
             let attributes = Self::attributes_from_start(reader, &start)?;
             self.pending_ends.push_back(name.clone());
-            return Ok(InternalEvent::StartElement { name, attributes });
+            InternalEvent::StartElement { name, attributes }
           }
           Event::End(end) => {
             let (resolve, _) = reader.resolver().resolve_element(end.name());
             let name = Self::name_from_qname_with_resolve(end.name(), resolve)?;
-            return Ok(InternalEvent::EndElement { name });
+            InternalEvent::EndElement { name }
           }
-          Event::Text(text) => {
-            let decoded = text.decode().map_err(|e| e.to_string())?;
-            let unescaped =
-              quick_xml::escape::unescape(decoded.as_ref()).map_err(|e| e.to_string())?;
-            let trimmed = unescaped.trim();
-            if trimmed.is_empty() {
-              continue;
-            }
-            return Ok(InternalEvent::Characters(trimmed.to_string()));
+          Event::Text(chunk) => {
+            let decoded = chunk.decode().map_err(|e| e.to_string())?;
+            // References are separate events in quick-xml 0.39. Do not
+            // unescape again: &amp;apos; must remain literal "&apos;".
+            let chunk = if text.is_empty() {
+              decoded.trim_start()
+            } else {
+              decoded.as_ref()
+            };
+            trim_end = if chunk.trim_end().is_empty() {
+              trim_end + chunk.len()
+            } else {
+              chunk.len() - chunk.trim_end().len()
+            };
+            text.push_str(chunk);
+            continue;
           }
           Event::CData(cdata) => {
-            return Ok(InternalEvent::Characters(
-              cdata.decode().map_err(|e| e.to_string())?.into_owned(),
-            ));
+            text.push_str(&cdata.decode().map_err(|e| e.to_string())?);
+            // CDATA's own whitespace is significant.
+            trim_end = 0;
+            continue;
+          }
+          Event::GeneralRef(reference) => {
+            if let Some(character) = reference.resolve_char_ref().map_err(|e| e.to_string())? {
+              text.push(character);
+            } else {
+              let name = reference.decode().map_err(|e| e.to_string())?;
+              let resolved = quick_xml::escape::resolve_xml_entity(&name)
+                .ok_or_else(|| format!("Unknown entity reference: &{};", name))?;
+              text.push_str(resolved);
+            }
+            trim_end = 0;
+            continue;
           }
           Event::Eof => {
             self.eof = true;
-            if self.seen_any {
-              return Ok(InternalEvent::EndDocument);
+            if !self.seen_any {
+              return Err("Unexpected end of stream: no root element found".to_string());
             }
-            return Err("Unexpected end of stream: no root element found".to_string());
+            InternalEvent::EndDocument
           }
-          Event::Decl(_)
-          | Event::PI(_)
-          | Event::DocType(_)
-          | Event::Comment(_)
-          | Event::GeneralRef(_) => {}
+          Event::Decl(_) | Event::PI(_) | Event::DocType(_) | Event::Comment(_) => continue,
+        };
+        text.truncate(text.len() - trim_end);
+        if !text.is_empty() {
+          // Never coalesce across an element boundary. Preserve the resolved
+          // boundary until the next pull, including synthetic empty-tag ends.
+          self.pending_event = Some(boundary);
+          return Ok(InternalEvent::Characters(text));
         }
+        return Ok(boundary);
       }
     }
 
